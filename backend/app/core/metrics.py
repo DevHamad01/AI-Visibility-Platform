@@ -1,10 +1,4 @@
-"""Prometheus metrics. Exposed at GET /metrics.
-
-Node-level pipeline metrics (node_duration_seconds, node_runs_total, runs_total)
-are added in Phase 3 alongside the pipeline that produces them. This module
-carries the generic HTTP metric (Phase 1) and the external-dependency metrics
-used by every DataForSEO/LLM call from Phase 2 onward (CLAUDE.md section 6).
-"""
+"""Prometheus metrics. Exposed at GET /metrics. CLAUDE.md section 6."""
 
 from __future__ import annotations
 
@@ -56,6 +50,24 @@ api_cache_hits_total = Counter(
     "api_cache_hits_total",
     "DataForSEO response cache hits/misses by endpoint.",
     labelnames=("endpoint", "result"),
+)
+
+node_duration_seconds = Histogram(
+    "node_duration_seconds",
+    "Pipeline node (agent) duration in seconds.",
+    labelnames=("node",),
+)
+
+node_runs_total = Counter(
+    "node_runs_total",
+    "Pipeline node executions by outcome.",
+    labelnames=("node", "status"),
+)
+
+runs_total = Counter(
+    "runs_total",
+    "Analysis runs completed, by final status.",
+    labelnames=("status",),
 )
 
 
