@@ -1,223 +1,263 @@
-# AI Visibility Platform
+# AI Visibility Platform · Signal
 
-Take-home assessment for Aegasis Labs. Finds where a brand is losing visibility to
-competitors in Google search, Google AI Overviews and LLM answers, scores the
-opportunities, and recommends content to close the gap.
+A full-stack assessment for Aegasis Labs. Track a brand across Google organic search,
+AI Overviews and indexed LLM mentions; rank measurable content opportunities and turn
+them into a content plan. Angular UI, Flask API, LangGraph pipeline, PostgreSQL history,
+Redis/RQ jobs and DataForSEO live data.
 
-This README is written as the project is built, phase by phase (see `PROMPTS.md`),
-and finalized in the last phase. `CLAUDE.md` is the full specification.
+## Start in under five minutes
 
-## Status
+Prerequisites: Docker Desktop with Linux containers and Compose. Initial image downloads
+can take longer on a slow connection. No host Python or Node installation is required.
 
-- [x] **Phase 1** — Docker foundation, backend skeleton, DB schema, brands/competitors
-  API, observability basics.
-- [x] **Phase 2** — DataForSEO tools + LLM layer + resilience.
-- [x] **Phase 3** — LangGraph pipeline, scoring, runs API, background jobs.
-- [ ] Phase 4 — Angular frontend.
-- [ ] Phase 5 — Hardening, CI, final README.
-
-## Quick start
-
-```bash
-cp .env.example .env   # fill in DataForSEO/LLM keys when you reach Phase 2+
-make up                # docker compose up --build
+```sh
+cp .env.example .env
+# Set DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD and at least one LLM API key.
+# Use a VERIFIED DataForSEO account. Sandbox is also gated by verification.
+docker compose up --build
 ```
 
-- API: http://localhost:8000
-- Swagger UI: http://localhost:8000/api/docs (lands on a doc-UI picker; direct
-  link is http://localhost:8000/api/docs/swagger)
-- Liveness: http://localhost:8000/healthz · Readiness: http://localhost:8000/readyz
-- Metrics: http://localhost:8000/metrics
+- Product: http://localhost:4200
+- Swagger: http://localhost:8000/api/docs/swagger
+- OpenAPI: http://localhost:8000/api/docs/openapi.json
+- Liveness / readiness: http://localhost:8000/healthz and http://localhost:8000/readyz
+- API metrics: http://localhost:8000/metrics
 
-```bash
-make test     # run the backend test suite inside the api container
-make migrate  # apply Alembic migrations manually (the api container does this on boot too)
-make logs     # follow all service logs
-make down     # stop everything
+The app starts without provider keys so reviewers can inspect setup and failure handling.
+An actual analysis needs working credentials. There is no application demo mode or seeded
+analytics. Postgres and Redis have **no published host ports**. Migrations run on API startup.
+The frontend uses Node 22 to build and nginx to serve; all browser requests use one origin.
+
+```sh
+make up       # docker compose up --build
+make test     # full backend tests in the api image with real Postgres / Redis
+make logs     # follow structured logs
+make down     # stop containers, keep volumes
+make migrate  # manual migration
 ```
 
-The frontend (`http://localhost:4200`) is added in Phase 4.
+For frontend development with Node 22.22.3+ in the Node 22 family:
+`cd frontend && npm ci && npm start`. The dev server proxies `/api` to port 8000.
+`npm run lint`, `npm run build`, and `npm test -- --watch=false` verify the frontend.
 
-## What's built in Phase 1
+## Product walkthrough
 
-- **Docker Compose**: `db` (Postgres 16) and `redis` (Redis 7), neither published on
-  the host (this machine already runs Postgres/Redis for other projects); `api`
-  (Flask) on `8000`; `worker` (RQ, same image as `api`, idle until Phase 3 enqueues
-  pipeline jobs).
-- **Backend**: Flask 3 + flask-openapi3 (Pydantic v2 request/response models,
-  Swagger UI at `/api/docs`), SQLAlchemy 2 models + Alembic migration for every table
-  in the domain model (brands, competitors, runs, run_stages, queries,
-  visibility_observations, opportunities, recommendations, api_cache), structured
-  JSON logs via `structlog` with request/trace id propagation, RFC 7807
-  (`application/problem+json`) error responses everywhere, Prometheus `/metrics`,
-  `/healthz` and `/readyz` (checks DB + Redis).
-- **API**: full CRUD on `/api/v1/brands` and `/api/v1/brands/{id}/competitors` with
-  cursor pagination (`{items, next_cursor}`), domain validation, `Location` headers
-  on create. The run/pipeline endpoints from the full spec exist and are documented
-  in Swagger, but return `501 application/problem+json` — they're built in Phase 3.
-- **Tests**: run inside the `api` container against a real, throwaway Postgres
-  database (`<db>_test`), not SQLite — the models use Postgres-native `JSONB`/`UUID`
-  column types that SQLite doesn't support, so a real Postgres instance is the only
-  thing that actually exercises the schema we ship. Covers brand create (`201` +
-  `Location`), validation failure (`422` problem shape), and missing resource
-  (`404` problem shape).
+1. Open the portfolio and choose **Add a brand**. Enter a name, domain, relevant business
+   description, and up to nine competitors. Optional location/language scope the analysis.
+2. Open its workspace and choose **Run analysis**. A background job returns immediately.
+3. Watch the SSE stage timeline. On interruption the UI falls back to five-second polling.
+   The trace shows attempts, timings, dependency failures and the serving LLM provider/model.
+4. Explore measured query/channel visibility, observed competitors and cited sources. Missing
+   observations are distinct from measured absence. The chart has a text-table alternative.
+5. Filter opportunities by query, minimum score, intent or channel; open **Score breakdown**
+   to see every deterministic component. Move recommendations through the workflow board.
+6. Export CSV/JSON; re-run to preserve a new historical snapshot; compare two runs of the brand.
+   A lower opportunity score indicates a smaller remaining gap, but demand/difficulty changes
+   can also move it. Failed and partial runs keep their evidence and errors.
 
-## What's built in Phase 2
+The visual direction is documented in `docs/design-direction.md`. Layouts support 1280px and
+768px, light/dark appearance, keyboard focus, reduced motion and explicit empty/error states.
 
-- **DataForSEO tools** (`backend/app/tools/dataforseo/`): one function per logical
-  call — `keyword_ideas`, `search_volume`, `serp_google_organic`, `llm_mentions_search`
-  (the live endpoint DataForSEO's own docs now recommend over the brief's suggested
-  `.../llm_mentions/search/live`, which they mark deprecated-but-working). Each has a
-  Pydantic args model validated *before* any HTTP call — invalid/partial args return
-  a `ToolArgumentError` value, never an exception. A shared `DataForSEOClient` handles
-  Basic auth, timeouts, retry/circuit-breaker, the Postgres `api_cache` table (key =
-  sha256 of endpoint + canonical JSON payload), and cost metrics. DataForSEO returns
-  HTTP 200 for most logical errors with the real outcome in `tasks[0].status_code` —
-  classified here (e.g. `40202` rate-limited → retryable, `40100` auth failure → not).
-  AI Overview/People-Also-Ask item shapes are parsed defensively (recursive, type-
-  tolerant) since DataForSEO's own docs describe their nesting inconsistently.
-- **Resilience module** (`app/core/resilience.py`): tenacity exponential backoff with
-  full jitter, honouring a server's `Retry-After` when present; a per-dependency
-  circuit breaker (closed → open after N consecutive failures → half-open after a
-  cooldown); shared by every DataForSEO and LLM call.
-- **LLM layer** (`app/llm/`): one `LLMClient` with `complete_structured(prompt, schema)`
-  and `call_tools(prompt, tools)`. Providers (`groq`, `openai`, `anthropic`, `gemini`)
-  and their order come entirely from `LLM_CHAIN` — agent code never imports a provider
-  SDK. No provider-native structured-output mode is used: the client asks for JSON in
-  the prompt, validates with Pydantic, and does exactly one repair retry (re-asking
-  with the validation error attached) before falling through to the next provider in
-  the chain. An empty `GEMINI_API_KEY` (or any other provider's) simply drops that
-  entry from the active chain — the rest still works.
-  LLM model ids were verified live against each provider's current docs on
-  2026-11-10: `gemini-2.5-flash` turned out to be deprecated (Google auto-routes it to
-  `gemini-3.5-flash-lite` from Dec 1, 2026), so the default chain uses
-  `gemini-3.5-flash-lite` directly instead. `openai`/`anthropic` SDKs are pinned one
-  major version below latest (`openai==2.54.0`, `anthropic==0.125.0`) because their
-  newer releases moved to an internal `httpx2` client that `respx` — used by every
-  test in this suite to mock HTTP with no real network — cannot intercept; the
-  chat/tool-calling API surface is unchanged between these versions and current ones.
-- **Tests**: tool argument validation (missing/invalid/out-of-range, never reaches
-  HTTP), retry-then-success on 503, 429 honouring `Retry-After`, no retry on 401,
-  circuit opening after N failures and failing fast, a cache hit skipping the second
-  HTTP call, happy-path parsing for all four tools, LLM JSON repair retry, provider
-  fallback after exhausted retries (and which provider served the call), and dropped
-  invalid/unknown tool-call arguments.
-- **Smoke CLI**: `python -m app.tools.dataforseo.smoke "<query>"` calls
-  `serp_google_organic` + `keyword_ideas` live (depth=1, limit=1 — the smallest
-  requests that still exercise AI Overview / People Also Ask parsing) and prints
-  account balance before/after via the free `user_data` endpoint. Deliberately never
-  calls `llm_mentions_search` here — at $0.10/request + $0.001/row it's far more
-  expensive than the others and shouldn't be spent on a routine check.
-- **Budget guard**: a `RunBudget` caps estimated + actual DataForSEO spend per run
-  (`DATAFORSEO_MAX_COST_PER_RUN`, default $0.15). Cost is estimated from DataForSEO's
-  published pricing *before* a call is made (`app/tools/dataforseo/pricing.py`); a
-  call that would exceed the remaining budget is never sent. A cache hit is always
-  free regardless of budget. `llm_mentions_search` takes up to 10 brand/competitor
-  targets in **one** call by design, specifically so a run never pays its $0.10 floor
-  cost once per competitor.
-- **DataForSEO Sandbox**: `DATAFORSEO_BASE_URL=https://sandbox.dataforseo.com` gives
-  free dummy-data responses in the same shape as production, for routine local
-  development against a small trial balance. The app still defaults to the real,
-  billed `api.dataforseo.com` (the brief's "live data by default" rule) — the sandbox
-  is opt-in via env var, never automatic.
+## Architecture and agent contracts
 
-## What's built in Phase 3
+```mermaid
+flowchart TD
+  Browser[Angular signals + reactive forms] --> Nginx[nginx / API proxy]
+  Nginx --> API[Flask + OpenAPI]
+  API --> DB[(PostgreSQL)]
+  API --> Queue[(Redis / RQ)]
+  Queue --> Worker[Python worker]
+  Worker --> Planner[QueryPlanner: validated tool calls]
+  Planner --> Keywords[KeywordRetrieval]
+  Planner --> Serp[SerpRetrieval]
+  Planner --> Mentions[LlmMentionsRetrieval]
+  Keywords --> Normalizer
+  Serp --> Normalizer
+  Mentions --> Normalizer
+  Normalizer --> Enough{Enough data?}
+  Enough -- no --> Report
+  Enough -- yes --> Score[OpportunityScorer]
+  Score --> Gap[GapAnalyst]
+  Gap --> Recommendations[Recommender]
+  Recommendations --> Report[Report: succeeded / partial / failed]
+  Report --> DB
+```
 
-- **Pipeline** (`backend/app/pipeline/`): the full LangGraph DAG from CLAUDE.md section
-  4 — QueryPlanner → {KeywordRetrieval, SerpRetrieval, LlmMentionsRetrieval} (parallel
-  fan-out) → Normalizer → conditional route on data sufficiency → OpportunityScorer →
-  GapAnalyst → Recommender → Report. Every node is wrapped by one decorator
-  (`app/pipeline/stages.py`) that logs start/end, updates its `run_stages` row, emits
-  `node_duration_seconds`/`node_runs_total`, and — critically — always catches the
-  node's exception and turns it into a recorded stage failure rather than aborting the
-  graph, so other branches' work is never discarded. `PipelineContext.session` is a
-  property backed by a `scoped_session` (thread-local), not a stored reference —
-  LangGraph runs the three retrieval nodes on separate threads, and a single
-  SQLAlchemy `Session` isn't safe to share across them.
-- **Budget-critical caps enforced in code, not just prompts**: QueryPlanner's output is
-  capped to at most one `keyword_ideas` call, `MAX_SERP_CALLS_PER_RUN` distinct
-  `serp_google_organic` calls, and exactly one `llm_mentions_search` call, regardless
-  of what the LLM proposes. `LLMClient.call_tools` (Phase 2) already drops any
-  malformed/unknown tool call before QueryPlanner even sees it.
-- **Scoring** (`app/scoring/`): the exact formula from CLAUDE.md section 4, with every
-  open design choice (channel weights, the "no difficulty data" default, how
-  "contested" is computed) named as a constant in `scoring/config.py` and unit-tested
-  for determinism and stable ranking under ties.
-- **Runs API**: every endpoint from CLAUDE.md section 3 — create (202 + Location +
-  Idempotency-Key, 409 if already active), history, detail with full per-stage trace,
-  live SSE progress, the visibility matrix, filtered/sorted opportunities,
-  recommendations (+ PATCH status), compare two runs, portfolio overview, CSV/JSON
-  export, and a rate-limited client-error intake.
-- **Worker**: the RQ job (`app/pipeline/runner.py`) that a real worker process (or a
-  test, directly) calls to run one analysis end to end; a job timeout
-  (`RUN_TIMEOUT_SECONDS`) always leaves the run `failed` with a reason instead of stuck
-  `running` forever.
-- **Tests**: scoring determinism/ordering, a full pipeline happy path against mocked
-  DataForSEO+LLM HTTP, a SERP-failure run proving the surviving keyword/LLM-mentions
-  work is kept and the run ends `partial`, malformed/capped planner tool calls, and
-  runs API status codes (202/409/404). 51 tests total.
+| Stage | Responsibility and output |
+|---|---|
+| QueryPlanner | LLM tool-calling → Pydantic-validated calls; code enforces caps and deduplication |
+| KeywordRetrieval | One keyword-ideas request → typed keyword/volume/difficulty data |
+| SerpRetrieval | Budgeted SERPs → organic positions, surfaced PAA questions, AI citations |
+| LlmMentionsRetrieval | One aggregated request for brand and competitors → indexed LLM evidence |
+| Normalizer | Pure parsing and domain/name matching → persisted queries and observations |
+| OpportunityScorer | Pure deterministic formula → ranked opportunities and components |
+| GapAnalyst | Validated LLM JSON → intent labels and evidence-grounded explanations |
+| Recommender | Validated LLM JSON → actionable content titles, outlines and rationale |
+| Report | Retained results + stage failures → terminal status and run metrics |
 
-## Known limitations / next steps
+A typed `RunState` carries node outputs. A common wrapper records stage lifecycle, logs and
+metrics; exceptions become persisted failures. Partially successful SERP batches keep their
+results while marking the stage/run partial. Unvisited stages become skipped. Each execution
+thread gets a scoped SQLAlchemy session, rolls back failed transactions, binds trace context
+and releases its session. RQ timeout handling and failure/killed-process callbacks record
+worker failures. DB brand-row locking serializes active-run checks; queue submission errors
+mark the persisted run failed. DB/Redis are not an atomic outbox: see limitations.
 
-- Populated frontend results still need a successful live provider run; no success data is fabricated.
-- `make test` recreates its own Postgres database (`<db>_test`) on the same `db`
-  service; it does not touch the application database.
-- DataForSEO's AI Overview / People Also Ask response shapes are parsed defensively
-  rather than against a byte-exact confirmed schema (their own docs describe the
-  nesting inconsistently across pages) — field names there should be revisited against
-  a real response the first time a run actually surfaces one.
-- **Prometheus metrics are per-process.** `node_duration_seconds`, `node_runs_total`,
-  `external_calls_total` etc. are recorded in the `worker` process but `/metrics` is
-  served by the `api` process, which has its own registry — so right now `/metrics`
-  only shows HTTP-layer metrics, not pipeline/external-call metrics. A real deployment
-  would need either a `/metrics` endpoint on the worker too (scraped separately) or
-  `prometheus_client`'s multiprocess mode with a shared directory. Full detail is
-  always available per-run via `GET /runs/{id}` regardless.
-- **The DataForSEO trial account used for development is still not verified**, on
-  either the live API or the Sandbox (`sandbox.dataforseo.com` returns the identical
-  `HTTP 403` / inner `status_code` `40104` "please verify your account" error — the
-  Sandbox is gated by the same account check, not a separate free tier). No cost has
-  ever been incurred (`cost` is `0`, `tasks` is `null` — the request never reaches a
-  billable task) and the account balance was confirmed unchanged at $1.00 via
-  `user_data`, checked repeatedly through Phase 3. A real run against the live API
-  (brand "Acme Corp" + 2 competitors) was executed through the actual running stack to
-  produce `docs/sample-trace.log`: QueryPlanner ran for real against Groq
-  (`groq:openai/gpt-oss-120b`), proposed one `keyword_ideas` call, which failed with
-  the verification error; the run correctly routed around the missing data and ended
-  `failed` with `dataforseo_cost_usd: 0.0` and a clear `error_summary` — proving the
-  resilience/observability design works against a real failure, not just mocks. The
-  live LLM check is unaffected: both Groq and Gemini (`gemini-3.5-flash-lite`)
-  answered real structured-output requests correctly. A full live run with real
-  opportunities/recommendations is pending account verification.
+## Opportunity definition and formula
+
+An opportunity is a query with demand and a remaining visibility gap, strengthened by evidence
+that competitors already appear. This is prioritization, not a promise of traffic or ROI.
+
+```text
+demand     = min(1, log10(1 + volume) / log10(1 + 50,000))
+visibility = mean(presence over observed channels)
+gap        = 1 - visibility
+contested  = visible tracked competitors / all tracked competitors
+difficulty = keyword_difficulty / 100, else competition, else 0.5
+score      = 100 × demand × gap × (0.6 + 0.4 × contested) × (1 - 0.5 × difficulty)
+```
+
+Organic presence is 1 for top 3, 0.6 for positions 4–10, 0.2 for 11–20 and 0 beyond.
+AI citations/LLM mentions are binary. Available channels have equal weights, defined with
+all other constants in `backend/app/scoring/config.py`. Unknown volume contributes zero;
+a query without observations currently has visibility zero (a lower-confidence opportunity).
+Log scaling prevents high-volume terms dominating; competitor presence supports relevance;
+the difficulty penalty reduces speculative work. All components are stored and displayed.
+Numbers come from DataForSEO and Python, never an LLM.
+
+## Providers, cost and resilience
+
+`LLM_CHAIN` configures the ordered provider/model chain. Development used
+`groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite`. OpenAI and Anthropic are first-class
+providers: set their key and corresponding `provider:model` entry to switch. Empty-key
+providers are skipped. Model availability and quotas depend on the account.
+
+Agents use `LLMClient.complete_structured` and `call_tools`, with JSON parsing, Pydantic
+validation, one repair attempt and ordered fallback. No provider-native strict structured
+output feature is required. Successful LLM stages record their actual provider/model.
+
+DataForSEO endpoints (all live by default):
+
+- `/v3/dataforseo_labs/google/keyword_ideas/live`
+- `/v3/keywords_data/google_ads/search_volume/live` (standalone tool)
+- `/v3/serp/google/organic/live/advanced`
+- `/v3/ai_optimization/llm_mentions/search_mentions/live`
+
+Every tool validates arguments before HTTP. The cache key includes provider base URL,
+endpoint and canonical request JSON, so **sandbox can never populate the live cache**.
+Default TTL is 24 hours. `DATAFORSEO_BASE_URL=https://sandbox.dataforseo.com` is explicit
+opt-in development configuration; it is never automatically selected.
+
+`DATAFORSEO_MAX_COST_PER_RUN` defaults to $0.15. Atomic reservations cover in-flight calls
+from parallel branches, per physical HTTP attempt. Actual reported costs are counted even
+when a task fails. Cache hits are free. One aggregated LLM Mentions call avoids repeated
+minimum charges. SERP estimates include depth, paid search operators and async AI Overview;
+paid PAA click expansion is disabled because its variable click count prevents a reliable
+pre-call bound. Normal surfaced PAA questions are still collected. Pricing estimates follow
+[the provider pricing table](https://dataforseo.com/pricing/google-serp/google-organic-serp-api)
+and must be reviewed if the provider changes rates; the provider account remains the final
+billing authority. The run cost measures DataForSEO charges, excluding LLM provider billing.
+
+External calls have configured timeouts. Retry uses exponential backoff/full jitter for
+connection errors, 429, 5xx and retryable inner DataForSEO statuses; Retry-After is honored.
+Auth, verification, billing and validation failures do not retry. Circuit breakers fail fast,
+then allow one half-open recovery probe. Idempotency keys avoid duplicate run submissions.
+
+## API and persistence
+
+Swagger documents `/api/v1`: brands/competitors CRUD; run create/history/detail/events;
+visibility/opportunities/recommendations; status updates; comparison; overview; CSV/JSON export;
+and frontend error intake. Responses have request IDs and RFC 7807 error bodies. Brand and
+competitor lists use cursor pagination. Run/results views are explicitly capped (100 runs,
+200 opportunities), with a null next cursor; full historical pagination is future work.
+
+Profiles, competitors, run snapshots, stage traces, queries, observations, opportunities,
+recommendations and cache entries persist in Postgres. Editing a profile never changes an
+old run's snapshot. The assessment references a missing “Section 4”; the implementation
+assumes all these entities and recommendation status changes must persist across restarts.
+
+## Debug “my run failed yesterday”
+
+1. Open the brand's history and failed run; copy its trace ID. The recorded stages show which
+   dependency failed, timing/attempts and which LLM served each completed LLM stage.
+2. Fetch `GET /api/v1/runs/<id>` or inspect `docker compose logs worker api`. Filter by run/trace ID;
+   correlate the HTTP request ID with queue submission and node/external-call events.
+3. Classify the cause: validation/planning, provider quota/auth, account verification, budget,
+   transient transport, database or worker failure. Repeating an auth/verification failure wastes time.
+4. Confirm `/readyz`, queue/worker health, provider account state and remaining balance. Repair
+   the cause, then start a new run; keep the original trace as evidence.
+
+Real excerpt from `docs/sample-trace.log` (2026-11-10; earlier live run):
+
+```json
+{"node":"query_planner","event":"node_succeeded","duration_ms":2131,"trace_id":"78adb177-d81f-4cd2-8b67-29a1c402ec1d"}
+{"dependency":"dataforseo","event":"external_call_non_retryable","trace_id":"78adb177-d81f-4cd2-8b67-29a1c402ec1d"}
+{"node":"keyword_retrieval","event":"node_failed","error_type":"StageFailedError","duration_ms":596,"trace_id":"78adb177-d81f-4cd2-8b67-29a1c402ec1d"}
+```
+
+The full original lines are in the trace file. The real provider returned HTTP 403 / 40104
+(account verification required); Groq planning succeeded, search data was unavailable and
+the run ended failed with zero DataForSEO spend. This is a real failure, not a success fixture.
+
+To deliberately exercise a SERP outage for an existing brand, run this **one-off process**:
+
+```sh
+docker compose run --rm -e DEMO_FAIL_SERP=true api python -m app.pipeline.failure_demo BRAND_UUID
+```
+
+Normal workers remain unchanged. Other provider calls remain real and budgeted; use a verified
+account for meaningful partial results. CI separately runs an automated mocked-provider pipeline
+failure test and uploads its actual emitted logs as the `simulated-failure-trace` artifact.
+Mocks exist only in automated tests. This one-off live demonstration has not been run from
+the Codex sandbox because Docker engine access was denied.
+
+Logs are structured JSON with request/run/trace/node context. Frontend server errors and global
+errors report to a bounded, rate-limited endpoint. Optional Sentry is enabled by `SENTRY_DSN`.
+API Prometheus metrics are exposed at `/metrics`; pipeline metrics are per worker process and
+are not currently aggregated into the API registry. Per-run persisted metrics remain available.
+
+## Verification and CI
+
+`.github/workflows/ci.yml` runs frontend formatting/tests/build plus a **fresh full Docker stack**,
+backend lint, regression tests against real Postgres/Redis, a keyless graceful-failure smoke flow,
+SPA/deep-link checks and the simulated-failure log capture. No real provider secrets are needed.
+
+Local Codex verification: frontend production build and formatting passed; 14 frontend tests
+passed. Python 3.12 dependency-isolated tests covered scoring, budgeting/concurrency, charged
+failures, cache namespaces, LLM validation/fallback, planner caps, pricing, SSE cleanup and
+circuit recovery (27 tests). Backend lint, syntax and Compose configuration checks passed.
+Browser checks against the existing backend created Linear with two competitors, exercised
+form validation, existing failed-run results/trace and comparison/history empty states, and
+reviewed 1280px/768px in light and dark mode. Screens contain only actual API data.
+
+Current full integration status is visible in the repository's Actions tab. Local Docker build,
+`make test` and a container clean-checkout run were blocked by the Codex desktop sandbox's
+Docker named-pipe permissions, so their execution is delegated to the committed CI workflow.
+The running local backend still uses the previous image until rebuilt; the Angular developer
+server on port 4200 uses the new frontend. Latest live account check: 403/40104, $0 cost, $1 balance.
+
+## Trade-offs and limitations
+
+- A small Flask/RQ system is explainable and sufficient for this assessment; no authentication,
+  multi-tenancy, deployment hardening or production access control is included. Keep local.
+- PostgreSQL is the only supported test DB; native JSONB/UUID behavior matters more than an
+  in-memory substitute. Database-dependent tests initialize their disposable DB on demand.
+- Provider-specific response parsing remains defensive. AI Overview/PAA parsing and populated
+  success/partial screens still need validation with a successful live run after account verification.
+- A score based on missing observations is lower confidence. Future work should show coverage
+  confidence explicitly and avoid treating unavailable channels as measured absence.
+- DB commit and Redis enqueue are separate. Enqueue errors are persisted and killed-job callbacks
+  handle work-process failures, but a transactional outbox and stale-run reconciliation are needed
+  for complete recovery if the entire worker host disappears. Queue depth is not a job scheduler.
+- Prometheus requires a multiprocess/exporter design for combined pipeline metrics. Run-level
+  persisted traces work now. List caps, N+1 overview queries and API pagination need scaling work.
+- Budget limits depend on provider pricing/response accuracy; add account-level caps and cost
+  reconciliation for production. The LLM chain may omit requested tool calls; absent observations
+  and skipped/empty stages remain visible rather than fabricating results.
 
 ## AI tools used
 
-Claude Code (Anthropic) was used for scaffolding, implementation and tests, under
-the author's direction and review. OpenAI Codex was used to continue frontend implementation, verification and final hardening after the Claude Code session.
-## Phase 4 — Signal frontend
-
-The Angular workspace is implemented in `frontend/`; its visual direction is recorded in
-`docs/design-direction.md`. It includes portfolio overview, brand setup/settings, brand
-history/trend, live SSE progress with polling fallback, stage trace, query/channel visibility
-heatmap and text/citation table, filtered opportunities with score drawer, recommendation
-status board, CSV/JSON export and two-run comparison. Appearance follows system preference
-until explicitly selected, with a persisted light/dark toggle.
-
-Run everything with `docker compose up --build`, then open http://localhost:4200.
-For a local frontend developer session (Node 22.22.3+): `cd frontend`, `npm ci`, `npm start`.
-The development proxy forwards `/api` to the already-running backend on port 8000.
-The production container builds with Node 22 and serves nginx. Its SSE location disables
-buffering and allows a 660-second read timeout. Gunicorn uses threaded workers so open event
-streams do not occupy every request slot.
-
-Verification on 2026-11-10: production frontend build and formatting check passed; 14 frontend
-tests passed. Browser checks used the real running backend: created Linear (`linear.app`)
-with Asana and Monday.com, checked validation, history/trend empty states, existing failed-run
-results and trace, comparison empty state, and 1280/768 layouts in both themes. No mock data
-was added to the running app. The live provider check still returned HTTP 403 / 40104
-(account verification required), cost $0; the free account lookup reported a $1 balance.
-Successful populated results/partial states are implemented against the API schema but await
-live provider verification. Docker rebuild and container-based regression tests could not run
-from the Codex desktop sandbox because access to Docker Desktop's named pipe was denied.
-The local Angular server was left running on port 4200 against the existing backend.
-
+Claude Code (Anthropic) was used for scaffolding, backend implementation and tests. OpenAI Codex
+continued frontend implementation, verification, hardening, CI and documentation. Both operated
+under the author's direction and review. The author remains responsible for understanding and
+defending the design. See `docs/interview-cheat-sheet.md` for a concise interview reference.

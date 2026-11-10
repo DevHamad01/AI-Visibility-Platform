@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.4'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm test -- --watch=false
+      - run: npm run build
+
+  backend-and-clean-checkout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure disposable environment without provider keys
+        run: cp .env.example .env
+      - name: Build and start the entire stack from the checkout
+        run: docker compose up -d --build --wait --wait-timeout 180
+      - name: Backend lint
+        run: docker compose exec -T api ruff check app tests
+      - name: Backend regression suite against real Postgres and Redis
+        run: docker compose run --rm api pytest -q
+      - name: Capture an actual simulated-failure pipeline trace from the test suite
+        run: docker compose run --rm api pytest -s tests/test_pipeline.py::test_pipeline_serp_failure_ends_partial_and_keeps_other_work > simulated-failure-trace.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simulated-failure-trace
+          path: simulated-failure-trace.log
+      - name: Verify nginx, API, persistence, queue and graceful provider failure
+        run: python3 scripts/verify_stack.py --exercise-failure
+      - name: Print diagnostics on failure
+        if: failure()
+        run: docker compose logs --tail=100
+      - name: Remove disposable stack
+        if: always()
+        run: docker compose down -v
