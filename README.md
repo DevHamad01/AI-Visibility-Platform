@@ -11,7 +11,7 @@ and finalized in the last phase. `CLAUDE.md` is the full specification.
 
 - [x] **Phase 1** — Docker foundation, backend skeleton, DB schema, brands/competitors
   API, observability basics.
-- [ ] Phase 2 — DataForSEO tools + LLM layer + resilience.
+- [x] **Phase 2** — DataForSEO tools + LLM layer + resilience.
 - [ ] Phase 3 — LangGraph pipeline, scoring, runs API, background jobs.
 - [ ] Phase 4 — Angular frontend.
 - [ ] Phase 5 — Hardening, CI, final README.
@@ -62,12 +62,61 @@ The frontend (`http://localhost:4200`) is added in Phase 4.
   `Location`), validation failure (`422` problem shape), and missing resource
   (`404` problem shape).
 
+## What's built in Phase 2
+
+- **DataForSEO tools** (`backend/app/tools/dataforseo/`): one function per logical
+  call — `keyword_ideas`, `search_volume`, `serp_google_organic`, `llm_mentions_search`
+  (the live endpoint DataForSEO's own docs now recommend over the brief's suggested
+  `.../llm_mentions/search/live`, which they mark deprecated-but-working). Each has a
+  Pydantic args model validated *before* any HTTP call — invalid/partial args return
+  a `ToolArgumentError` value, never an exception. A shared `DataForSEOClient` handles
+  Basic auth, timeouts, retry/circuit-breaker, the Postgres `api_cache` table (key =
+  sha256 of endpoint + canonical JSON payload), and cost metrics. DataForSEO returns
+  HTTP 200 for most logical errors with the real outcome in `tasks[0].status_code` —
+  classified here (e.g. `40202` rate-limited → retryable, `40100` auth failure → not).
+  AI Overview/People-Also-Ask item shapes are parsed defensively (recursive, type-
+  tolerant) since DataForSEO's own docs describe their nesting inconsistently.
+- **Resilience module** (`app/core/resilience.py`): tenacity exponential backoff with
+  full jitter, honouring a server's `Retry-After` when present; a per-dependency
+  circuit breaker (closed → open after N consecutive failures → half-open after a
+  cooldown); shared by every DataForSEO and LLM call.
+- **LLM layer** (`app/llm/`): one `LLMClient` with `complete_structured(prompt, schema)`
+  and `call_tools(prompt, tools)`. Providers (`groq`, `openai`, `anthropic`, `gemini`)
+  and their order come entirely from `LLM_CHAIN` — agent code never imports a provider
+  SDK. No provider-native structured-output mode is used: the client asks for JSON in
+  the prompt, validates with Pydantic, and does exactly one repair retry (re-asking
+  with the validation error attached) before falling through to the next provider in
+  the chain. An empty `GEMINI_API_KEY` (or any other provider's) simply drops that
+  entry from the active chain — the rest still works.
+  LLM model ids were verified live against each provider's current docs on
+  2026-11-10: `gemini-2.5-flash` turned out to be deprecated (Google auto-routes it to
+  `gemini-3.5-flash-lite` from Dec 1, 2026), so the default chain uses
+  `gemini-3.5-flash-lite` directly instead. `openai`/`anthropic` SDKs are pinned one
+  major version below latest (`openai==2.54.0`, `anthropic==0.125.0`) because their
+  newer releases moved to an internal `httpx2` client that `respx` — used by every
+  test in this suite to mock HTTP with no real network — cannot intercept; the
+  chat/tool-calling API surface is unchanged between these versions and current ones.
+- **Tests**: tool argument validation (missing/invalid/out-of-range, never reaches
+  HTTP), retry-then-success on 503, 429 honouring `Retry-After`, no retry on 401,
+  circuit opening after N failures and failing fast, a cache hit skipping the second
+  HTTP call, happy-path parsing for all four tools, LLM JSON repair retry, provider
+  fallback after exhausted retries (and which provider served the call), and dropped
+  invalid/unknown tool-call arguments.
+- **Smoke CLI**: `python -m app.tools.dataforseo.smoke "<query>"` calls
+  `serp_google_organic` + `keyword_ideas` live and prints a short summary — run inside
+  the `api` container to sanity-check real credentials and response parsing by eye.
+
 ## Known limitations / next steps
 
-- DataForSEO calls, the LLM layer, the LangGraph pipeline and the frontend are not
-  built yet — see the phase checklist above.
+- The LangGraph pipeline and the frontend are not built yet — see the phase checklist
+  above. The DataForSEO tools and LLMClient exist as building blocks but aren't wired
+  into a graph until Phase 3.
 - `make test` recreates its own Postgres database (`<db>_test`) on the same `db`
   service; it does not touch the application database.
+- DataForSEO's AI Overview / People Also Ask response shapes are parsed defensively
+  rather than against a byte-exact confirmed schema (their own docs describe the
+  nesting inconsistently across pages) — field names there should be revisited against
+  a real response the first time a run actually surfaces one.
 
 ## AI tools used
 
