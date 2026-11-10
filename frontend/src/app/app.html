@@ -1,39 +1,140 @@
 <a class="skip-link" href="#main">Skip to content</a>
-<div class="workspace">
-  <aside class="sidebar">
-    <a routerLink="/" class="wordmark"
-      ><span class="brand-mark" aria-hidden="true">s</span>signal<span class="wordmark-dot"
-        >.</span
-      ></a
-    >
-    <div class="workspace-label">VISIBILITY WORKSPACE</div>
-    <nav aria-label="Main navigation">
-      <a routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }"
-        ><span aria-hidden="true">▦</span> Overview</a
-      ><a routerLink="/brands/new" routerLinkActive="active"
-        ><span aria-hidden="true">＋</span> Add brand</a
+
+<div class="flex min-h-screen bg-canvas">
+  <!-- Sidebar: fixed rail at ≥1024px, slide-over below. -->
+  <aside
+    class="fixed inset-y-0 left-0 z-40 flex w-[248px] flex-col border-r-hairline border-stroke-200 bg-surface-0 transition-transform duration-150 lg:translate-x-0"
+    [class.translate-x-0]="navOpen()"
+    [class.-translate-x-full]="!navOpen()"
+    [attr.aria-hidden]="null"
+  >
+    <div class="flex h-14 items-center gap-2.5 border-b-hairline border-stroke-200 px-4">
+      <a routerLink="/" class="flex items-center gap-2.5" (click)="navOpen.set(false)">
+        <span
+          class="grid h-7 w-7 place-items-center rounded-8 bg-brand-500 text-white shadow-raised"
+        >
+          <app-icon name="activity" [size]="16" />
+        </span>
+        <span class="text-label-md font-semibold tracking-[-0.2px] text-ink-950">Signal</span>
+      </a>
+      <button
+        type="button"
+        class="btn-ghost btn-icon ml-auto lg:hidden"
+        (click)="navOpen.set(false)"
+        aria-label="Close navigation"
       >
+        <app-icon name="x" [size]="16" />
+      </button>
+    </div>
+
+    <nav class="flex-1 overflow-y-auto p-3" aria-label="Main navigation">
+      <p class="eyebrow px-2 pb-2">Workspace</p>
+      <ul class="space-y-0.5">
+        @for (item of nav; track item.path) {
+          <li>
+            <a
+              [routerLink]="item.path"
+              routerLinkActive="bg-surface-100 text-ink-950"
+              [routerLinkActiveOptions]="{ exact: item.exact }"
+              (click)="navOpen.set(false)"
+              class="flex items-center gap-2.5 rounded-8 px-2.5 py-2 text-label-sm font-medium text-ink-600 transition-colors duration-150 hover:bg-surface-50 hover:text-ink-950"
+            >
+              <app-icon [name]="item.icon" [size]="16" />
+              {{ item.label }}
+            </a>
+          </li>
+        }
+      </ul>
     </nav>
-    <div class="sidebar-bottom">
-      <div class="connection"><span class="status-dot"></span>Live data workspace</div>
-      <p>Find where your brand<br />should be showing up.</p>
-      <button class="theme-toggle" (click)="theme.toggle()" [attr.aria-pressed]="theme.dark()">
-        {{ theme.dark() ? '☀ Light appearance' : '◐ Dark appearance' }}</button
-      ><a
-        href="http://localhost:8000/api/docs/swagger"
-        target="_blank"
-        rel="noopener"
-        class="muted small-text"
-        >API documentation ↗</a
+
+    <div class="space-y-3 border-t-hairline border-stroke-200 p-3">
+      <div
+        class="rounded-8 border-hairline border-stroke-200 bg-surface-50 p-3"
+        style="background: rgb(var(--brand-500) / 0.05)"
       >
+        <p class="flex items-center gap-1.5 text-label-xs font-semibold text-ink-950">
+          <app-icon name="sparkles" [size]="12" /> Live data only
+        </p>
+        <p class="mt-1 text-label-xs leading-[16px] text-ink-600">
+          Every number on screen comes from DataForSEO and your LLM provider — nothing is mocked.
+        </p>
+      </div>
+
+      <div class="flex items-center gap-1.5">
+        <button
+          type="button"
+          class="btn-secondary btn-sm flex-1"
+          (click)="theme.toggle()"
+          [attr.aria-pressed]="theme.dark()"
+        >
+          <app-icon [name]="theme.dark() ? 'sun' : 'moon'" [size]="12" />
+          {{ theme.dark() ? 'Light' : 'Dark' }}
+        </button>
+        <a
+          [href]="docsUrl"
+          target="_blank"
+          rel="noopener"
+          class="btn-secondary btn-sm"
+          title="Open the API documentation"
+        >
+          API <app-icon name="external-link" [size]="12" />
+        </a>
+      </div>
     </div>
   </aside>
-  <div class="main-shell">
-    <header class="topbar">
-      <span>Workspace <span class="muted">/</span> <strong>AI visibility</strong></span
-      ><span class="topbar-note">Search. Answers. Opportunity.</span>
+
+  <!-- Scrim for the mobile slide-over. -->
+  @if (navOpen()) {
+    <button
+      type="button"
+      class="fixed inset-0 z-30 bg-ink-950/40 lg:hidden"
+      (click)="navOpen.set(false)"
+      aria-label="Close navigation"
+    ></button>
+  }
+
+  <div class="flex min-w-0 flex-1 flex-col lg:pl-[248px]">
+    <header
+      class="sticky top-0 z-20 flex h-14 items-center gap-3 border-b-hairline border-stroke-200 bg-surface-0/85 px-4 backdrop-blur-md lg:px-6"
+    >
+      <button
+        type="button"
+        class="btn-ghost btn-icon lg:hidden"
+        (click)="navOpen.set(true)"
+        aria-label="Open navigation"
+      >
+        <app-icon name="grid" [size]="16" />
+      </button>
+      <p class="flex min-w-0 items-center gap-1.5 text-label-sm text-ink-400">
+        <app-icon name="target" [size]="14" />
+        <span class="truncate">AI search visibility · brand vs competitors</span>
+      </p>
+      <!-- The primary "Add brand" action lives in the sidebar and on the
+           overview page itself; a third copy here just competes with them.
+           This slot carries the live backend status instead. -->
+      <span
+        class="ml-auto flex shrink-0 items-center gap-1.5 rounded-full border-hairline border-stroke-200 bg-surface-50 py-1 pl-2 pr-2.5 text-label-xs font-medium text-ink-600"
+        [title]="apiReady() === false ? 'The API is not reachable' : 'Connected to the API'"
+      >
+        <span
+          class="h-1.5 w-1.5 rounded-full"
+          [class]="apiReady() === false ? 'bg-danger-500' : 'bg-success-500'"
+        ></span>
+        <span class="hidden sm:inline">{{ apiReady() === false ? 'API offline' : 'Live' }}</span>
+      </span>
     </header>
-    <main id="main" tabindex="-1"><router-outlet /></main>
-    <footer>Signal · AI visibility intelligence <span>Powered by your connected data</span></footer>
+
+    <main id="main" tabindex="-1" class="flex-1 px-4 py-6 lg:px-6 lg:py-8">
+      <div class="mx-auto w-full max-w-[1320px] animate-fade-up">
+        <router-outlet />
+      </div>
+    </main>
+
+    <footer
+      class="flex flex-wrap items-center justify-between gap-2 border-t-hairline border-stroke-200 px-4 py-4 text-label-xs text-ink-400 lg:px-6"
+    >
+      <span>Signal · AI visibility intelligence</span>
+      <span>Opportunity scores are deterministic — the LLM only explains them.</span>
+    </footer>
   </div>
 </div>
