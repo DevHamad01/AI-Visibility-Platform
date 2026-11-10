@@ -14,7 +14,9 @@ phase before starting the next. Never leave the repo in a non-running state at t
 1. **Git identity is already configured locally (Hamad).** Never run `git config`, never change the
    remote, never force-push. Do **not** add `Co-Authored-By` or any AI attribution trailer to commits.
    Use Conventional Commit messages (`feat(backend): ...`, `fix(frontend): ...`, `docs: ...`, `test: ...`).
-   Commit small and often — reviewers read the commit history.
+   Commit small and often, in logical steps, as you work — reviewers read the commit history. Do
+   **not** push after each commit; push **once** at the end of each phase, after all that phase's
+   checks pass.
 2. **Never commit secrets.** `.env` is git-ignored. Only `.env.example` files are committed.
 3. **Live data by default.** DataForSEO and the LLM are called for real in the running app.
    Mocks/fixtures are allowed **only in automated tests**. There is no "demo mode" default.
