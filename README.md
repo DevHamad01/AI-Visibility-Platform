@@ -12,7 +12,7 @@ and finalized in the last phase. `CLAUDE.md` is the full specification.
 - [x] **Phase 1** — Docker foundation, backend skeleton, DB schema, brands/competitors
   API, observability basics.
 - [x] **Phase 2** — DataForSEO tools + LLM layer + resilience.
-- [ ] Phase 3 — LangGraph pipeline, scoring, runs API, background jobs.
+- [x] **Phase 3** — LangGraph pipeline, scoring, runs API, background jobs.
 - [ ] Phase 4 — Angular frontend.
 - [ ] Phase 5 — Hardening, CI, final README.
 
@@ -121,28 +121,74 @@ The frontend (`http://localhost:4200`) is added in Phase 4.
   billed `api.dataforseo.com` (the brief's "live data by default" rule) — the sandbox
   is opt-in via env var, never automatic.
 
+## What's built in Phase 3
+
+- **Pipeline** (`backend/app/pipeline/`): the full LangGraph DAG from CLAUDE.md section
+  4 — QueryPlanner → {KeywordRetrieval, SerpRetrieval, LlmMentionsRetrieval} (parallel
+  fan-out) → Normalizer → conditional route on data sufficiency → OpportunityScorer →
+  GapAnalyst → Recommender → Report. Every node is wrapped by one decorator
+  (`app/pipeline/stages.py`) that logs start/end, updates its `run_stages` row, emits
+  `node_duration_seconds`/`node_runs_total`, and — critically — always catches the
+  node's exception and turns it into a recorded stage failure rather than aborting the
+  graph, so other branches' work is never discarded. `PipelineContext.session` is a
+  property backed by a `scoped_session` (thread-local), not a stored reference —
+  LangGraph runs the three retrieval nodes on separate threads, and a single
+  SQLAlchemy `Session` isn't safe to share across them.
+- **Budget-critical caps enforced in code, not just prompts**: QueryPlanner's output is
+  capped to at most one `keyword_ideas` call, `MAX_SERP_CALLS_PER_RUN` distinct
+  `serp_google_organic` calls, and exactly one `llm_mentions_search` call, regardless
+  of what the LLM proposes. `LLMClient.call_tools` (Phase 2) already drops any
+  malformed/unknown tool call before QueryPlanner even sees it.
+- **Scoring** (`app/scoring/`): the exact formula from CLAUDE.md section 4, with every
+  open design choice (channel weights, the "no difficulty data" default, how
+  "contested" is computed) named as a constant in `scoring/config.py` and unit-tested
+  for determinism and stable ranking under ties.
+- **Runs API**: every endpoint from CLAUDE.md section 3 — create (202 + Location +
+  Idempotency-Key, 409 if already active), history, detail with full per-stage trace,
+  live SSE progress, the visibility matrix, filtered/sorted opportunities,
+  recommendations (+ PATCH status), compare two runs, portfolio overview, CSV/JSON
+  export, and a rate-limited client-error intake.
+- **Worker**: the RQ job (`app/pipeline/runner.py`) that a real worker process (or a
+  test, directly) calls to run one analysis end to end; a job timeout
+  (`RUN_TIMEOUT_SECONDS`) always leaves the run `failed` with a reason instead of stuck
+  `running` forever.
+- **Tests**: scoring determinism/ordering, a full pipeline happy path against mocked
+  DataForSEO+LLM HTTP, a SERP-failure run proving the surviving keyword/LLM-mentions
+  work is kept and the run ends `partial`, malformed/capped planner tool calls, and
+  runs API status codes (202/409/404). 51 tests total.
+
 ## Known limitations / next steps
 
-- The LangGraph pipeline and the frontend are not built yet — see the phase checklist
-  above. The DataForSEO tools and LLMClient exist as building blocks but aren't wired
-  into a graph until Phase 3.
+- The frontend is not built yet (Phase 4).
 - `make test` recreates its own Postgres database (`<db>_test`) on the same `db`
   service; it does not touch the application database.
 - DataForSEO's AI Overview / People Also Ask response shapes are parsed defensively
   rather than against a byte-exact confirmed schema (their own docs describe the
   nesting inconsistently across pages) — field names there should be revisited against
   a real response the first time a run actually surfaces one.
-- **The DataForSEO trial account used for development is not yet verified.** A live
-  call on 2026-11-10 returned HTTP 403 with inner `status_code` `40104`: "Please
-  verify your account before using the API. You can complete verification in the user
-  panel: https://app.dataforseo.com/." No cost was incurred (the response's `cost` is
-  `0` and `tasks` is `null` — the request never reached a billable task) and the
-  account balance was confirmed unchanged at $1.00 before and after via `user_data`.
-  This blocks live verification of the DataForSEO tools' response parsing — it is not
-  specific to any one endpoint (e.g. LLM Mentions needing a plan upgrade); it blocks
-  all of them equally until the account is verified. The live LLM check is unaffected:
-  both Groq (`openai/gpt-oss-120b`) and Gemini (`gemini-3.5-flash-lite`) answered a
-  real structured-output request correctly on 2026-11-10.
+- **Prometheus metrics are per-process.** `node_duration_seconds`, `node_runs_total`,
+  `external_calls_total` etc. are recorded in the `worker` process but `/metrics` is
+  served by the `api` process, which has its own registry — so right now `/metrics`
+  only shows HTTP-layer metrics, not pipeline/external-call metrics. A real deployment
+  would need either a `/metrics` endpoint on the worker too (scraped separately) or
+  `prometheus_client`'s multiprocess mode with a shared directory. Full detail is
+  always available per-run via `GET /runs/{id}` regardless.
+- **The DataForSEO trial account used for development is still not verified**, on
+  either the live API or the Sandbox (`sandbox.dataforseo.com` returns the identical
+  `HTTP 403` / inner `status_code` `40104` "please verify your account" error — the
+  Sandbox is gated by the same account check, not a separate free tier). No cost has
+  ever been incurred (`cost` is `0`, `tasks` is `null` — the request never reaches a
+  billable task) and the account balance was confirmed unchanged at $1.00 via
+  `user_data`, checked repeatedly through Phase 3. A real run against the live API
+  (brand "Acme Corp" + 2 competitors) was executed through the actual running stack to
+  produce `docs/sample-trace.log`: QueryPlanner ran for real against Groq
+  (`groq:openai/gpt-oss-120b`), proposed one `keyword_ideas` call, which failed with
+  the verification error; the run correctly routed around the missing data and ended
+  `failed` with `dataforseo_cost_usd: 0.0` and a clear `error_summary` — proving the
+  resilience/observability design works against a real failure, not just mocks. The
+  live LLM check is unaffected: both Groq and Gemini (`gemini-3.5-flash-lite`)
+  answered real structured-output requests correctly. A full live run with real
+  opportunities/recommendations is pending account verification.
 
 ## AI tools used
 

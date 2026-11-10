@@ -39,4 +39,4 @@ Thumbs.db
 
 # --- Logs ---
 *.log
-docs/sample-trace.log.tmp
+!docs/sample-trace.log
