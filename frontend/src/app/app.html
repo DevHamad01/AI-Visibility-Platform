@@ -1,0 +1,39 @@
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="workspace">
+  <aside class="sidebar">
+    <a routerLink="/" class="wordmark"
+      ><span class="brand-mark" aria-hidden="true">s</span>signal<span class="wordmark-dot"
+        >.</span
+      ></a
+    >
+    <div class="workspace-label">VISIBILITY WORKSPACE</div>
+    <nav aria-label="Main navigation">
+      <a routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }"
+        ><span aria-hidden="true">▦</span> Overview</a
+      ><a routerLink="/brands/new" routerLinkActive="active"
+        ><span aria-hidden="true">＋</span> Add brand</a
+      >
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="connection"><span class="status-dot"></span>Live data workspace</div>
+      <p>Find where your brand<br />should be showing up.</p>
+      <button class="theme-toggle" (click)="theme.toggle()" [attr.aria-pressed]="theme.dark()">
+        {{ theme.dark() ? '☀ Light appearance' : '◐ Dark appearance' }}</button
+      ><a
+        href="http://localhost:8000/api/docs/swagger"
+        target="_blank"
+        rel="noopener"
+        class="muted small-text"
+        >API documentation ↗</a
+      >
+    </div>
+  </aside>
+  <div class="main-shell">
+    <header class="topbar">
+      <span>Workspace <span class="muted">/</span> <strong>AI visibility</strong></span
+      ><span class="topbar-note">Search. Answers. Opportunity.</span>
+    </header>
+    <main id="main" tabindex="-1"><router-outlet /></main>
+    <footer>Signal · AI visibility intelligence <span>Powered by your connected data</span></footer>
+  </div>
+</div>
