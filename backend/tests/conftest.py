@@ -22,6 +22,7 @@ from sqlalchemy.engine import make_url
 
 from app import create_app
 from app.core.config import Settings, get_settings
+from app.core.resilience import _circuit_breakers
 from app.db.base import Base, get_engine, remove_session
 
 
@@ -73,3 +74,32 @@ def app(test_settings: Settings) -> Iterator[Flask]:
 @pytest.fixture()
 def client(app: Flask) -> FlaskClient:
     return app.test_client()
+
+
+@pytest.fixture(autouse=True)
+def _reset_circuit_breakers() -> Iterator[None]:
+    """Circuit breakers live in a process-global registry keyed by dependency
+    name, so a circuit opened by one test would otherwise leak into the next."""
+    _circuit_breakers.clear()
+    yield
+    _circuit_breakers.clear()
+
+
+@pytest.fixture()
+def resilient_settings(test_settings: Settings) -> Settings:
+    """Fast retry/circuit-breaker settings so resilience tests don't sleep
+    through real exponential backoff."""
+    return test_settings.model_copy(
+        update={
+            "retry_max_attempts": 3,
+            "retry_backoff_base_seconds": 0.001,
+            "retry_backoff_max_seconds": 0.01,
+            "circuit_breaker_failure_threshold": 3,
+            "circuit_breaker_cooldown_seconds": 0.05,
+            "dataforseo_login": "test-login",
+            "dataforseo_password": "test-password",
+            "groq_api_key": "test-groq-key",
+            "gemini_api_key": "test-gemini-key",
+            "llm_chain": "groq:test-model-a,gemini:test-model-b",
+        }
+    )
