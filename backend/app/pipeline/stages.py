@@ -40,6 +40,7 @@ class NodeResult:
     state_update: dict[str, Any]
     output_summary: dict[str, Any] = field(default_factory=dict)
     attempts: int | None = None
+    error_message: str | None = None
 
 
 def create_pending_stages(ctx: PipelineContext) -> None:
@@ -49,11 +50,7 @@ def create_pending_stages(ctx: PipelineContext) -> None:
 
 
 def _get_stage(ctx: PipelineContext, name: str) -> RunStage:
-    stage = (
-        ctx.session.query(RunStage)
-        .filter(RunStage.run_id == ctx.run_id, RunStage.stage == name)
-        .one()
-    )
+    stage = ctx.session.query(RunStage).filter(RunStage.run_id == ctx.run_id, RunStage.stage == name).one()
     return stage
 
 
@@ -73,6 +70,9 @@ def run_node(
             result = fn(state)
         except Exception as exc:  # noqa: BLE001 — a node must never abort the graph
             duration_ms = int((time.monotonic() - start) * 1000)
+            # A failed flush leaves the transaction unusable until rollback.
+            ctx.session.rollback()
+            stage = _get_stage(ctx, name)
             stage.status = RunStageStatus.FAILED
             stage.error_type = type(exc).__name__
             stage.error_message = str(exc)[:2000]
@@ -94,7 +94,11 @@ def run_node(
             return {"stage_errors": merged_errors}
 
         duration_ms = int((time.monotonic() - start) * 1000)
-        stage.status = RunStageStatus.SUCCEEDED
+        stage.status = RunStageStatus.FAILED if result.error_message else RunStageStatus.SUCCEEDED
+        if result.error_message:
+            stage.error_type = "PartialRetrievalError"
+            stage.error_message = result.error_message
+            result.state_update["stage_errors"] = {name: result.error_message}
         if result.attempts is not None:
             stage.attempts = result.attempts
         stage.output_summary = result.output_summary
@@ -102,9 +106,9 @@ def run_node(
         stage.duration_ms = duration_ms
         ctx.session.commit()
         node_duration_seconds.labels(name).observe(duration_ms / 1000)
-        node_runs_total.labels(name, "succeeded").inc()
+        node_runs_total.labels(name, stage.status.value).inc()
         logger.info(
-            "node_succeeded",
+            "node_partial" if result.error_message else "node_succeeded",
             run_id=str(ctx.run_id),
             trace_id=ctx.trace_id,
             node=name,

@@ -14,6 +14,7 @@ from rq import Queue, Worker
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.base import init_engine
+from app.worker.callbacks import work_horse_killed
 
 QUEUE_NAME = "runs"
 
@@ -27,7 +28,7 @@ def main() -> None:
 
     connection = redis.Redis.from_url(settings.redis_url)
     queue = Queue(QUEUE_NAME, connection=connection)
-    worker = Worker([queue], connection=connection)
+    worker = Worker([queue], connection=connection, work_horse_killed_handler=work_horse_killed)
 
     logger.info("worker_starting", queue=QUEUE_NAME)
     worker.work(with_scheduler=False)

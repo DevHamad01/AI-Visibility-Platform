@@ -20,6 +20,8 @@ _CALL_FAILURE_TYPES = (RetryableError, NonRetryableError, CircuitOpenError, Budg
 
 
 def serp_retrieval(ctx: PipelineContext, state: RunState) -> NodeResult:
+    if ctx.settings.demo_fail_serp:
+        raise StageFailedError("Simulated SERP dependency outage (DEMO_FAIL_SERP=true).")
     calls = [c for c in state.get("tool_calls") or [] if c["name"] == "serp_google_organic"]
     entries: list[dict] = []
     errors: list[str] = []
@@ -47,4 +49,5 @@ def serp_retrieval(ctx: PipelineContext, state: RunState) -> NodeResult:
     return NodeResult(
         state_update={"serp_entries": entries},
         output_summary={"calls_attempted": len(calls), "entries_returned": len(entries), "errors": errors},
+        error_message="; ".join(errors) if errors else None,
     )

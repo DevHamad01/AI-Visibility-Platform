@@ -20,6 +20,7 @@ from app.db.models import (
     Opportunity,
     Query,
     Recommendation,
+    Run,
     RunStage,
     RunStageStatus,
     RunStatus,
@@ -90,7 +91,6 @@ PLANNED_TOOL_CALLS = [
             "location_code": 2840,
             "language_code": "en",
             "depth": 10,
-            "people_also_ask_click_depth": 1,
             "load_async_ai_overview": True,
         },
     },
@@ -289,9 +289,10 @@ def test_pipeline_happy_path_end_to_end(app, resilient_settings, monkeypatch):  
     run, created = create_run(session, redis_client, resilient_settings, brand)
     assert created
 
-    execute_run(str(run.id))
-
-    session.refresh(run)
+    run_id = run.id
+    execute_run(str(run_id))
+    session = get_session()
+    run = session.get(Run, run_id)
     assert run.status == RunStatus.SUCCEEDED, run.error_summary
     assert run.llm_provider == "groq"
 
@@ -338,9 +339,10 @@ def test_pipeline_serp_failure_ends_partial_and_keeps_other_work(app, resilient_
     redis_client = __import__("redis").Redis.from_url(resilient_settings.redis_url)
     run, _created = create_run(session, redis_client, resilient_settings, brand)
 
-    execute_run(str(run.id))
-
-    session.refresh(run)
+    run_id = run.id
+    execute_run(str(run_id))
+    session = get_session()
+    run = session.get(Run, run_id)
     assert run.status == RunStatus.PARTIAL, run.error_summary
     assert "serp_retrieval" in (run.error_summary or "")
 
@@ -356,3 +358,44 @@ def test_pipeline_serp_failure_ends_partial_and_keeps_other_work(app, resilient_
     assert len(queries) == 3
     opportunities = session.query(Opportunity).filter(Opportunity.run_id == run.id).all()
     assert len(opportunities) == 3
+
+
+@respx.mock
+def test_one_serp_call_fails_but_successful_serp_data_survives(app, resilient_settings, monkeypatch):
+    monkeypatch.setattr("app.pipeline.runner.get_settings", lambda: resilient_settings)
+    respx.post(GROQ_URL).mock(side_effect=_groq_side_effect)
+    _mock_keyword_ideas()
+    _mock_llm_mentions()
+    successful = httpx.Response(
+        200,
+        json=_df_envelope(
+            [
+                {
+                    "items": [
+                        {
+                            "type": "organic",
+                            "rank_absolute": 1,
+                            "domain": "acme.com",
+                            "url": "https://acme.com",
+                        }
+                    ]
+                }
+            ],
+            cost=0.002,
+        ),
+    )
+    respx.post(f"{DF_BASE}/v3/serp/google/organic/live/advanced").mock(
+        side_effect=[successful] + [httpx.Response(503)] * resilient_settings.retry_max_attempts
+    )
+    brand = _make_brand_with_competitors()
+    run, _ = create_run(get_session(), app.extensions["redis"], resilient_settings, brand)
+    run_id = run.id
+    execute_run(str(run_id))
+    session = get_session()
+    run = session.get(Run, run_id)
+    assert run.status == RunStatus.PARTIAL
+    stage = session.query(RunStage).filter_by(run_id=run_id, stage="serp_retrieval").one()
+    assert stage.status == RunStageStatus.FAILED
+    assert stage.error_type == "PartialRetrievalError"
+    assert stage.output_summary["entries_returned"] == 1
+    assert session.query(Query).filter_by(run_id=run_id, text="best project management software").one()

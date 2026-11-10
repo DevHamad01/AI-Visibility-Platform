@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     max_queries_per_run: int = 12
     max_serp_calls_per_run: int = 12
     run_timeout_seconds: int = 600
+    demo_fail_serp: bool = False  # One-off failure exercise only; never enabled by default.
 
     # --- HTTP timeouts (used from Phase 2 onward) ---
     http_connect_timeout_seconds: float = 5

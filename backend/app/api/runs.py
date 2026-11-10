@@ -43,7 +43,15 @@ from app.core.config import get_settings
 from app.core.errors import ConflictError, NotFoundError, ProblemError
 from app.core.logging import get_logger
 from app.db.base import get_session
-from app.db.models import Brand, Opportunity, Query, Recommendation, RecommendationStatus, Run
+from app.db.models import (
+    Brand,
+    Opportunity,
+    Query,
+    Recommendation,
+    RecommendationStatus,
+    Run,
+    VisibilityObservation,
+)
 from app.services.run_service import RunAlreadyActiveError, create_run
 
 logger = get_logger(__name__)
@@ -144,9 +152,7 @@ def run_events(path: RunIdPath):
 def run_visibility(path: RunIdPath):
     run = _get_run_or_404(path.run_id)
     session = get_session()
-    queries = session.execute(
-        select(Query).where(Query.run_id == run.id).order_by(Query.id)
-    ).scalars().all()
+    queries = session.execute(select(Query).where(Query.run_id == run.id).order_by(Query.id)).scalars().all()
     items = [
         QueryVisibilityResponse(
             id=q.id,
@@ -175,9 +181,7 @@ def run_opportunities(path: RunIdPath, query: OpportunitiesQuery):
     run = _get_run_or_404(path.run_id)
     session = get_session()
     stmt = (
-        select(Opportunity)
-        .join(Query, Opportunity.query_id == Query.id)
-        .where(Opportunity.run_id == run.id)
+        select(Opportunity).join(Query, Opportunity.query_id == Query.id).where(Opportunity.run_id == run.id)
     )
     if query.min_score is not None:
         stmt = stmt.where(Opportunity.score >= query.min_score)
@@ -185,11 +189,11 @@ def run_opportunities(path: RunIdPath, query: OpportunitiesQuery):
         stmt = stmt.where(Query.intent == query.intent)
     if query.q is not None:
         stmt = stmt.where(Query.text.ilike(f"%{query.q}%"))
+    if query.channel is not None:
+        # Filter before LIMIT; filtering a pre-limited list silently lost matches.
+        stmt = stmt.where(Query.observations.any(VisibilityObservation.channel == query.channel))
     stmt = stmt.order_by(Opportunity.score.desc() if query.sort == "score_desc" else Opportunity.score.asc())
     rows = list(session.execute(stmt.limit(query.limit)).scalars())
-
-    if query.channel is not None:
-        rows = [r for r in rows if any(o.channel.value == query.channel for o in r.query.observations)]
 
     items = [
         OpportunityResponse(
@@ -323,12 +327,16 @@ def overview():
 def export_run(path: RunIdPath, query: ExportQuery):
     run = _get_run_or_404(path.run_id)
     session = get_session()
-    opportunities = session.execute(
-        select(Opportunity)
-        .join(Query, Opportunity.query_id == Query.id)
-        .where(Opportunity.run_id == run.id)
-        .order_by(Opportunity.rank)
-    ).scalars().all()
+    opportunities = (
+        session.execute(
+            select(Opportunity)
+            .join(Query, Opportunity.query_id == Query.id)
+            .where(Opportunity.run_id == run.id)
+            .order_by(Opportunity.rank)
+        )
+        .scalars()
+        .all()
+    )
     recommendations_by_opportunity: dict[uuid.UUID, list[Recommendation]] = {}
     for recommendation in session.execute(
         select(Recommendation).where(Recommendation.run_id == run.id)

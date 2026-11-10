@@ -1,8 +1,7 @@
 """GET /runs/{id}/events: polls `run_stages` and streams changes as
 Server-Sent Events until the run reaches a terminal status. Flask/gunicorn
-sync workers hold the connection open for the duration — fine at this
-project's scale; the frontend's nginx proxy disables buffering for this
-route (Phase 4) so updates aren't held back in a buffer.
+threaded workers serve the connection while nginx disables buffering.
+Each poll releases its database connection before yielding or sleeping.
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ import time
 import uuid
 from collections.abc import Iterator
 
-from app.db.base import get_session
+from app.db.base import get_session, remove_session
 from app.db.models import Run, RunStage
 
 TERMINAL_STATUSES = {"succeeded", "partial", "failed"}
@@ -25,14 +24,14 @@ def _event(payload: dict) -> str:
 def run_events_stream(
     run_id: uuid.UUID, *, poll_interval: float = 1.0, max_duration: float = 600.0
 ) -> Iterator[str]:
-    session = get_session()
     start = time.monotonic()
     last_payload: dict | None = None
 
     while True:
-        session.expire_all()
+        session = get_session()
         run = session.get(Run, run_id)
         if run is None:
+            remove_session()
             yield _event({"error": "run not found"})
             return
 
@@ -51,11 +50,15 @@ def run_events_stream(
                 for s in stages
             ],
         }
+        terminal = run.status.value in TERMINAL_STATUSES
+        remove_session()
         if payload != last_payload:
             yield _event(payload)
             last_payload = payload
+        else:
+            yield ": heartbeat\n\n"
 
-        if run.status.value in TERMINAL_STATUSES:
+        if terminal:
             return
         if time.monotonic() - start > max_duration:
             yield _event({"warning": "stream timed out — the run may still be in progress"})

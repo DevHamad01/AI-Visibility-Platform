@@ -37,7 +37,7 @@ def _admin_database_url() -> str:
     return admin_url.replace("postgresql+psycopg://", "postgresql://")
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def _create_test_database() -> Iterator[None]:
     test_db_name = make_url(_test_database_url()).database
     with psycopg.connect(_admin_database_url(), autocommit=True) as conn:
@@ -60,7 +60,7 @@ def test_settings() -> Settings:
 
 
 @pytest.fixture()
-def app(test_settings: Settings) -> Iterator[Flask]:
+def app(test_settings: Settings, _create_test_database) -> Iterator[Flask]:
     flask_app = create_app(test_settings)
     Base.metadata.create_all(get_engine())
     yield flask_app

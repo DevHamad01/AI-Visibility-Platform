@@ -26,7 +26,9 @@ from __future__ import annotations
 from typing import Any
 
 from langgraph.graph import END, StateGraph
+from structlog.contextvars import bound_contextvars
 
+from app.db.base import remove_session
 from app.pipeline.context import PipelineContext
 from app.pipeline.nodes.gap_analyst import gap_analyst
 from app.pipeline.nodes.keyword_retrieval import keyword_retrieval
@@ -49,7 +51,18 @@ def build_graph(ctx: PipelineContext):
     graph = StateGraph(RunState)
 
     def node(name: str, fn):
-        return run_node(ctx, name, lambda s: fn(ctx, s))
+        wrapped = run_node(ctx, name, lambda s: fn(ctx, s))
+
+        def invoke(state):
+            # LangGraph uses worker threads; bind logging context and release
+            # each thread-local DB session on that same thread.
+            with bound_contextvars(run_id=str(ctx.run_id), trace_id=ctx.trace_id, node=name):
+                try:
+                    return wrapped(state)
+                finally:
+                    remove_session()
+
+        return invoke
 
     graph.add_node("query_planner", node("query_planner", query_planner))
     graph.add_node("keyword_retrieval", node("keyword_retrieval", keyword_retrieval))

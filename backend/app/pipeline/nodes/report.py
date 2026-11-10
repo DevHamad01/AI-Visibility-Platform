@@ -35,7 +35,13 @@ def report(ctx: PipelineContext, state: RunState) -> NodeResult:
     run.error_summary = "; ".join(f"{k}: {v}" for k, v in stage_errors.items()) or None
 
     stages = ctx.session.query(RunStage).filter(RunStage.run_id == ctx.run_id).all()
-    succeeded_count = sum(1 for s in stages if s.status == RunStageStatus.SUCCEEDED)
+    for stage in stages:
+        if stage.status == RunStageStatus.PENDING:
+            stage.status = RunStageStatus.SKIPPED
+            stage.finished_at = run.finished_at
+            stage.output_summary = {"reason": "Skipped after the data-sufficiency route."}
+    # The wrapper marks Report succeeded immediately after this function returns.
+    succeeded_count = sum(1 for s in stages if s.status == RunStageStatus.SUCCEEDED or s.stage == "report")
     failed_count = sum(1 for s in stages if s.status == RunStageStatus.FAILED)
     total_duration_ms = sum(s.duration_ms or 0 for s in stages)
 

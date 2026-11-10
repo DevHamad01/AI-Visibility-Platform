@@ -5,6 +5,7 @@ handling, the "already active" 409 check, and enqueueing the pipeline job
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from redis import Redis
 from sqlalchemy import select
@@ -47,6 +48,8 @@ def create_run(
     """Returns (run, created). A repeated request with the same
     `idempotency_key` for this brand returns the existing run unchanged
     (created=False) instead of creating a duplicate or raising 409."""
+    # Serialize the active-run check per brand across API threads/processes.
+    session.execute(select(Brand).where(Brand.id == brand.id).with_for_update()).scalar_one()
     if idempotency_key:
         existing = session.execute(
             select(Run).where(Run.brand_id == brand.id, Run.idempotency_key == idempotency_key)
@@ -76,12 +79,22 @@ def create_run(
     # run never has to import the pipeline/LangGraph stack into the API
     # process — only the worker process does.
     from rq import Queue
+    from rq.job import Callback
 
     queue = Queue(QUEUE_NAME, connection=redis_client)
-    queue.enqueue(
-        "app.pipeline.runner.execute_run",
-        str(run.id),
-        job_timeout=settings.run_timeout_seconds,
-        result_ttl=0,
-    )
+    try:
+        queue.enqueue(
+            "app.pipeline.runner.execute_run",
+            str(run.id),
+            job_id=f"run-{run.id}",
+            job_timeout=settings.run_timeout_seconds,
+            result_ttl=0,
+            on_failure=Callback("app.worker.callbacks.job_failed"),
+        )
+    except Exception:
+        run.status = RunStatus.FAILED
+        run.finished_at = datetime.now(UTC)
+        run.error_summary = "Could not enqueue the analysis. Check Redis availability and start a new run."
+        session.commit()
+        raise
     return run, True

@@ -14,7 +14,7 @@ import structlog
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
-from app.db.base import get_engine, get_session, init_engine
+from app.db.base import get_engine, get_session, init_engine, remove_session
 from app.db.models import Run, RunStatus
 from app.llm.client import LLMClient
 from app.pipeline.context import PipelineContext
@@ -68,6 +68,7 @@ def execute_run(run_id: str) -> None:
         logger.info("run_finished")
     except Exception as exc:  # noqa: BLE001 — last-resort guard; nodes already catch their own
         logger.error("run_crashed", error=str(exc), error_type=type(exc).__name__)
+        session.rollback()
         failed_run = session.get(Run, run_uuid)
         if failed_run is not None and failed_run.status not in (
             RunStatus.SUCCEEDED,
@@ -79,4 +80,5 @@ def execute_run(run_id: str) -> None:
             failed_run.error_summary = f"{type(exc).__name__}: {exc}"
             session.commit()
     finally:
+        remove_session()
         structlog.contextvars.clear_contextvars()
