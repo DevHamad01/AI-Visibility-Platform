@@ -103,8 +103,23 @@ The frontend (`http://localhost:4200`) is added in Phase 4.
   fallback after exhausted retries (and which provider served the call), and dropped
   invalid/unknown tool-call arguments.
 - **Smoke CLI**: `python -m app.tools.dataforseo.smoke "<query>"` calls
-  `serp_google_organic` + `keyword_ideas` live and prints a short summary — run inside
-  the `api` container to sanity-check real credentials and response parsing by eye.
+  `serp_google_organic` + `keyword_ideas` live (depth=1, limit=1 — the smallest
+  requests that still exercise AI Overview / People Also Ask parsing) and prints
+  account balance before/after via the free `user_data` endpoint. Deliberately never
+  calls `llm_mentions_search` here — at $0.10/request + $0.001/row it's far more
+  expensive than the others and shouldn't be spent on a routine check.
+- **Budget guard**: a `RunBudget` caps estimated + actual DataForSEO spend per run
+  (`DATAFORSEO_MAX_COST_PER_RUN`, default $0.15). Cost is estimated from DataForSEO's
+  published pricing *before* a call is made (`app/tools/dataforseo/pricing.py`); a
+  call that would exceed the remaining budget is never sent. A cache hit is always
+  free regardless of budget. `llm_mentions_search` takes up to 10 brand/competitor
+  targets in **one** call by design, specifically so a run never pays its $0.10 floor
+  cost once per competitor.
+- **DataForSEO Sandbox**: `DATAFORSEO_BASE_URL=https://sandbox.dataforseo.com` gives
+  free dummy-data responses in the same shape as production, for routine local
+  development against a small trial balance. The app still defaults to the real,
+  billed `api.dataforseo.com` (the brief's "live data by default" rule) — the sandbox
+  is opt-in via env var, never automatic.
 
 ## Known limitations / next steps
 
@@ -117,6 +132,17 @@ The frontend (`http://localhost:4200`) is added in Phase 4.
   rather than against a byte-exact confirmed schema (their own docs describe the
   nesting inconsistently across pages) — field names there should be revisited against
   a real response the first time a run actually surfaces one.
+- **The DataForSEO trial account used for development is not yet verified.** A live
+  call on 2026-11-10 returned HTTP 403 with inner `status_code` `40104`: "Please
+  verify your account before using the API. You can complete verification in the user
+  panel: https://app.dataforseo.com/." No cost was incurred (the response's `cost` is
+  `0` and `tasks` is `null` — the request never reached a billable task) and the
+  account balance was confirmed unchanged at $1.00 before and after via `user_data`.
+  This blocks live verification of the DataForSEO tools' response parsing — it is not
+  specific to any one endpoint (e.g. LLM Mentions needing a plan upgrade); it blocks
+  all of them equally until the account is verified. The live LLM check is unaffected:
+  both Groq (`openai/gpt-oss-120b`) and Gemini (`gemini-3.5-flash-lite`) answered a
+  real structured-output request correctly on 2026-11-10.
 
 ## AI tools used
 
