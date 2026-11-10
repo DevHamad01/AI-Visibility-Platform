@@ -64,6 +64,7 @@ class CircuitBreaker:
         self._consecutive_failures = 0
         self._state = CircuitState.CLOSED
         self._opened_at: float | None = None
+        self._probe_in_flight = False
         self._lock = threading.Lock()
         circuit_state.labels(dependency).set(0)
 
@@ -76,20 +77,34 @@ class CircuitBreaker:
             return self._state
 
     def before_call(self) -> None:
-        if self.state is CircuitState.OPEN:
-            raise CircuitOpenError(self.dependency)
+        with self._lock:
+            if self._state is CircuitState.OPEN:
+                if self._opened_at is None or time.monotonic() - self._opened_at < self.cooldown_seconds:
+                    raise CircuitOpenError(self.dependency)
+                self._state = CircuitState.HALF_OPEN
+            if self._state is CircuitState.HALF_OPEN:
+                if self._probe_in_flight:
+                    raise CircuitOpenError(self.dependency)
+                self._probe_in_flight = True
+
+    def cancel_probe(self) -> None:
+        """A local preflight error (e.g. budget rejection) is not a dependency failure."""
+        with self._lock:
+            self._probe_in_flight = False
 
     def record_success(self) -> None:
         with self._lock:
             self._consecutive_failures = 0
             self._state = CircuitState.CLOSED
             self._opened_at = None
+            self._probe_in_flight = False
             circuit_state.labels(self.dependency).set(0)
 
     def record_failure(self) -> None:
         with self._lock:
             self._consecutive_failures += 1
-            if self._consecutive_failures >= self.failure_threshold:
+            self._probe_in_flight = False
+            if self._state is CircuitState.HALF_OPEN or self._consecutive_failures >= self.failure_threshold:
                 self._state = CircuitState.OPEN
                 self._opened_at = time.monotonic()
                 circuit_state.labels(self.dependency).set(1)
@@ -160,9 +175,7 @@ def call_with_retry[T](
             external_retries_total.labels(dependency, endpoint).inc(attempts - 1)
         circuit.record_success()
         external_calls_total.labels(dependency, endpoint, "success").inc()
-        logger.info(
-            "external_call_succeeded", dependency=dependency, endpoint=endpoint, attempts=attempts
-        )
+        logger.info("external_call_succeeded", dependency=dependency, endpoint=endpoint, attempts=attempts)
         assert result is not None
         return result
     except RetryableError:
@@ -179,4 +192,7 @@ def call_with_retry[T](
         circuit.record_failure()
         external_calls_total.labels(dependency, endpoint, "non_retryable").inc()
         logger.warning("external_call_non_retryable", dependency=dependency, endpoint=endpoint)
+        raise
+    except Exception:
+        circuit.cancel_probe()
         raise
