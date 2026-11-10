@@ -47,16 +47,20 @@ For frontend development with Node 22.22.3+ in the Node 22 family:
 2. Open its workspace and choose **Run analysis**. A background job returns immediately.
 3. Watch the SSE stage timeline. On interruption the UI falls back to five-second polling.
    The trace shows attempts, timings, dependency failures and the serving LLM provider/model.
-4. Explore measured query/channel visibility, observed competitors and cited sources. Missing
-   observations are distinct from measured absence. The chart has a text-table alternative.
+4. Explore measured query/channel visibility, observed competitors and cited sources. The
+   matrix keeps three states apart: visible, measured but absent, and never measured. Every
+   cell carries a glyph as well as a colour, so presence never depends on colour alone.
 5. Filter opportunities by query, minimum score, intent or channel; open **Score breakdown**
    to see every deterministic component. Move recommendations through the workflow board.
 6. Export CSV/JSON; re-run to preserve a new historical snapshot; compare two runs of the brand.
    A lower opportunity score indicates a smaller remaining gap, but demand/difficulty changes
    can also move it. Failed and partial runs keep their evidence and errors.
 
-The visual direction is documented in `docs/design-direction.md`. Layouts support 1280px and
-768px, light/dark appearance, keyboard focus, reduced motion and explicit empty/error states.
+The visual direction is documented in `docs/design-direction.md`: Tailwind over semantic CSS
+custom properties, one warm accent, Inter with tabular figures, a 1.2px hairline as the signature
+border, and a fixed colour-blind-safe order for the four channel slots. Layouts are verified at
+1280px and 768px in light and dark, with visible focus, reduced-motion support and designed
+loading, empty, error and partial states.
 
 ## Architecture and agent contracts
 
