@@ -34,7 +34,10 @@ class SerpGoogleOrganicArgs(BaseModel):
     language_code: str = Field(default="en", min_length=2, max_length=10)
     device: Literal["desktop", "mobile"] = "desktop"
     depth: int = Field(default=10, ge=1, le=200)
-    people_also_ask_click_depth: int | None = Field(default=None, ge=1, le=4)
+    people_also_ask_click_depth: None = Field(
+        default=None,
+        description="Paid PAA expansion is disabled; normal surfaced PAA questions are included.",
+    )
     load_async_ai_overview: bool = False
 
 
@@ -85,7 +88,13 @@ def serp_google_organic(
             "load_async_ai_overview": args.load_async_ai_overview,
         }
     ]
-    task = client.post(ENDPOINT, payload, estimated_cost=estimate_serp_google_organic_cost())
+    task = client.post(
+        ENDPOINT,
+        payload,
+        estimated_cost=estimate_serp_google_organic_cost(
+            args.depth, keyword=args.keyword, load_async_ai_overview=args.load_async_ai_overview
+        ),
+    )
     result0 = (task.get("result") or [{}])[0]
     items = result0.get("items") or []
 

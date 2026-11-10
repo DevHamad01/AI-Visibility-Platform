@@ -43,8 +43,9 @@ Call these tools:
    brand sells or the problem it solves (not the brand name itself). Set limit to {max_queries}.
 2. `serp_google_organic` — up to {max_serp_calls} calls, one per realistic buyer-intent search
    query a prospective customer of this brand would type into Google (e.g. "best X for Y",
-   "X vs Y", "X pricing", "X alternatives"). Every query must be different. Set
-   people_also_ask_click_depth to 1 and load_async_ai_overview to true on every call.
+   "X vs Y", "X pricing", "X alternatives"). Every query must be different. Set depth
+   to 10 and load_async_ai_overview to true. Omit people_also_ask_click_depth: paid
+   expansion is disabled. Use normal queries without paid search operators.
 3. `llm_mentions_search` — exactly ONE call, combining every target into that single call.
    Its `targets` list must have one entry for the brand's own domain
    ({brand_snapshot["domain"]}) and one entry for each competitor's domain listed above

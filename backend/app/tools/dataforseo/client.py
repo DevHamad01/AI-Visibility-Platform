@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -107,7 +108,8 @@ class DataForSEOClient:
         `estimated_cost` (from app.tools.dataforseo.pricing) is checked
         against the run budget *before* any HTTP call — a cache hit is
         always free regardless of budget, since it costs nothing."""
-        key = cache_key(endpoint, payload)
+        # Sandbox and live responses must never share a cache entry.
+        key = cache_key(f"{self._settings.dataforseo_base_url.rstrip('/')}{endpoint}", payload)
         cached = self._get_cached(key)
         if cached is not None:
             api_cache_hits_total.labels(endpoint, "hit").inc()
@@ -115,20 +117,22 @@ class DataForSEOClient:
             return cached
         api_cache_hits_total.labels(endpoint, "miss").inc()
 
-        if self._budget is not None:
-            self._budget.check(endpoint, estimated_cost)
-
         task = call_with_retry(
-            lambda: self._do_post(endpoint, payload),
+            lambda: self._budgeted_post(endpoint, payload, estimated_cost),
             dependency="dataforseo",
             endpoint=endpoint,
             policy=self._policy,
             circuit=self._circuit,
         )
-        if self._budget is not None:
-            self._budget.record_actual_cost(endpoint, float(task.get("cost") or 0))
         self._set_cached(key, endpoint, task)
         return task
+
+    def _budgeted_post(
+        self, endpoint: str, payload: list[dict[str, Any]], estimated_cost: float
+    ) -> dict[str, Any]:
+        reservation = self._budget.reserve(endpoint, estimated_cost) if self._budget else nullcontext()
+        with reservation:
+            return self._do_post(endpoint, payload)
 
     def get_user_data(self) -> dict[str, Any]:
         """GET /v3/appendix/user_data — account balance/rate-limits. Never
@@ -182,7 +186,9 @@ class DataForSEOClient:
         raise NonRetryableError(message)
 
     def _record_cost(self, endpoint: str, body: dict[str, Any]) -> None:
-        cost = body.get("cost") or 0
+        cost = float(body.get("cost") or sum(float(t.get("cost") or 0) for t in body.get("tasks") or []))
+        if self._budget is not None and cost:
+            self._budget.record_actual_cost(endpoint, cost)
         if cost:
             dataforseo_cost_usd_total.labels(endpoint).inc(cost)
 
