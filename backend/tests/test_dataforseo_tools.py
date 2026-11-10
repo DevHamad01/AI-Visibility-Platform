@@ -65,9 +65,23 @@ def test_serp_organic_out_of_range_never_calls_http(df_client):
 
 
 @respx.mock
-def test_llm_mentions_missing_target_never_calls_http(df_client):
+def test_llm_mentions_missing_targets_never_calls_http(df_client):
     route = respx.post(f"https://api.dataforseo.com{LLM_MENTIONS_ENDPOINT}")
-    result = llm_mentions_search(df_client, {"location_code": 2840})  # no keyword or domain
+    result = llm_mentions_search(df_client, {"location_code": 2840})  # no "targets" at all
+    assert isinstance(result, ToolArgumentError)
+    assert not route.called
+
+
+@respx.mock
+def test_llm_mentions_more_than_ten_targets_never_calls_http(df_client):
+    route = respx.post(f"https://api.dataforseo.com{LLM_MENTIONS_ENDPOINT}")
+    result = llm_mentions_search(
+        df_client,
+        {
+            "targets": [{"domain": f"competitor{i}.com"} for i in range(11)],
+            "location_code": 2840,
+        },
+    )
     assert isinstance(result, ToolArgumentError)
     assert not route.called
 
@@ -216,7 +230,14 @@ def test_llm_mentions_happy_path(df_client):
     )
 
     result = llm_mentions_search(
-        df_client, {"target_keyword": "project management software", "location_code": 2840}
+        df_client,
+        {
+            "targets": [
+                {"keyword": "project management software"},
+                {"domain": "monday.com"},
+            ],
+            "location_code": 2840,
+        },
     )
 
     assert not isinstance(result, ToolArgumentError)
