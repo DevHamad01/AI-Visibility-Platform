@@ -141,19 +141,22 @@ provider, e.g.
 ```sh
 # OpenAI only
 OPENAI_API_KEY=sk-...
-LLM_CHAIN=openai:gpt-4.1-mini
+LLM_CHAIN=openai:gpt-6.1-sol
 
 # Anthropic only
 ANTHROPIC_API_KEY=sk-ant-...
-LLM_CHAIN=anthropic:claude-sonnet-5
+LLM_CHAIN=anthropic:claude-sonnet-5-5
 
 # Anthropic primary, OpenAI fallback if it exhausts retries or its circuit opens
-LLM_CHAIN=anthropic:claude-sonnet-5,openai:gpt-4.1-mini
+LLM_CHAIN=anthropic:claude-sonnet-5-5,openai:gpt-6.1-sol
 ```
 
 Empty-key providers are skipped automatically. Model ids change often — verify the current
-id against the provider's docs before relying on it; the ids above were confirmed working at
-the time of writing. Model availability and quotas depend on the account.
+id against the provider's docs before relying on it; the ids above were confirmed against
+platform.claude.com and OpenAI's model docs on 2026-11-10. Reasoning effort (e.g. `medium`)
+is a separate API parameter on both providers, not part of the model id string, and is not
+currently exposed through this project's config — the LLM client always uses each provider's
+default effort for the given model. Model availability and quotas depend on the account.
 
 Agents use `LLMClient.complete_structured` and `call_tools`, with JSON parsing, Pydantic
 validation, one repair attempt and ordered fallback. No provider-native strict structured
