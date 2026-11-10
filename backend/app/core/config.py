@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     dataforseo_login: str = ""
     dataforseo_password: str = ""
     dataforseo_base_url: str = "https://api.dataforseo.com"
+    # Hard cap on estimated + actual DataForSEO spend per pipeline run. A
+    # trial/sandbox account's balance is tiny and must survive the whole
+    # project, not just one run.
+    dataforseo_max_cost_per_run: float = 0.15
 
     # --- LLM chain (used from Phase 2 onward) ---
     llm_chain: str = ""
