@@ -28,6 +28,7 @@ from app.core.resilience import (
 )
 from app.db.base import get_session
 from app.db.models import ApiCache
+from app.tools.dataforseo.budget import RunBudget
 
 logger = get_logger(__name__)
 
@@ -81,8 +82,9 @@ def _classify_inner_status(status_code: int | None) -> str:
 
 
 class DataForSEOClient:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, budget: RunBudget | None = None) -> None:
         self._settings = settings
+        self._budget = budget
         self._circuit: CircuitBreaker = get_circuit_breaker(
             "dataforseo",
             settings.circuit_breaker_failure_threshold,
@@ -94,11 +96,17 @@ class DataForSEOClient:
             backoff_max_seconds=settings.retry_backoff_max_seconds,
         )
 
-    def post(self, endpoint: str, payload: list[dict[str, Any]]) -> dict[str, Any]:
+    def post(
+        self, endpoint: str, payload: list[dict[str, Any]], *, estimated_cost: float = 0.0
+    ) -> dict[str, Any]:
         """`endpoint` is a path like '/v3/serp/google/organic/live/advanced'.
         Returns the first task's dict (status_code, status_message, cost,
         result). Raises DataForSEOStatusError / NonRetryableError / the last
-        RetryableError / CircuitOpenError on failure."""
+        RetryableError / CircuitOpenError / BudgetExceededError on failure.
+
+        `estimated_cost` (from app.tools.dataforseo.pricing) is checked
+        against the run budget *before* any HTTP call — a cache hit is
+        always free regardless of budget, since it costs nothing."""
         key = cache_key(endpoint, payload)
         cached = self._get_cached(key)
         if cached is not None:
@@ -107,6 +115,9 @@ class DataForSEOClient:
             return cached
         api_cache_hits_total.labels(endpoint, "miss").inc()
 
+        if self._budget is not None:
+            self._budget.check(endpoint, estimated_cost)
+
         task = call_with_retry(
             lambda: self._do_post(endpoint, payload),
             dependency="dataforseo",
@@ -114,8 +125,24 @@ class DataForSEOClient:
             policy=self._policy,
             circuit=self._circuit,
         )
+        if self._budget is not None:
+            self._budget.record_actual_cost(endpoint, float(task.get("cost") or 0))
         self._set_cached(key, endpoint, task)
         return task
+
+    def get_user_data(self) -> dict[str, Any]:
+        """GET /v3/appendix/user_data — account balance/rate-limits. Never
+        billed, never cached (we always want a fresh balance), not subject
+        to the run budget."""
+        url = f"{self._settings.dataforseo_base_url}/v3/appendix/user_data"
+        response = httpx.get(
+            url,
+            auth=(self._settings.dataforseo_login, self._settings.dataforseo_password),
+            timeout=self._settings.http_read_timeout_seconds,
+        )
+        response.raise_for_status()
+        body = response.json()
+        return (body.get("tasks") or [{}])[0]
 
     def _do_post(self, endpoint: str, payload: list[dict[str, Any]]) -> dict[str, Any]:
         url = f"{self._settings.dataforseo_base_url}{endpoint}"
