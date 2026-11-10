@@ -1,11 +1,10 @@
-import { Component, DestroyRef, computed, effect, inject, input, signal } from '@angular/core';
 import { DecimalPipe } from '@angular/common';
-import { FormsModule } from '@angular/forms';
+import { Component, DestroyRef, computed, effect, inject, input, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { forkJoin, Subscription } from 'rxjs';
-import { EChartsCoreOption } from 'echarts/core';
-import { NgxEchartsDirective } from 'ngx-echarts';
+import { FormsModule } from '@angular/forms';
+import { Subscription, forkJoin } from 'rxjs';
 import { ApiService } from '../core/api.service';
+import { problemOf } from '../core/errors';
 import {
   Opportunity,
   Problem,
@@ -13,105 +12,198 @@ import {
   RecommendationStatus,
   VisibilityQuery,
 } from '../core/models';
-import { problemOf } from '../core/errors';
-import { ThemeService } from '../core/theme.service';
-import { Empty, ErrorState, Loading } from '../shared/ui';
-const CHANNELS = [
-  { key: 'google_organic', label: 'Google organic' },
-  { key: 'google_ai_overview', label: 'AI Overview' },
-  { key: 'llm_chatgpt', label: 'ChatGPT' },
-  { key: 'llm_google_ai', label: 'Google AI' },
+import { Icon, IconName } from '../shared/icon';
+import { Empty, ErrorState, ScoreMeter, Section, Skeleton } from '../shared/ui';
+
+/**
+ * Fixed channel order. The index also picks the colour slot, so a channel
+ * keeps the same colour everywhere in the app.
+ */
+const CHANNELS: { key: string; label: string; short: string }[] = [
+  { key: 'google_organic', label: 'Google organic', short: 'Organic' },
+  { key: 'google_ai_overview', label: 'AI Overview', short: 'AI Ovw' },
+  { key: 'llm_chatgpt', label: 'ChatGPT', short: 'ChatGPT' },
+  { key: 'llm_google_ai', label: 'Google AI', short: 'Google AI' },
 ];
+
+/** How to read each score component in the breakdown drawer. */
+const COMPONENT_COPY: Record<string, { label: string; what: string }> = {
+  demand: { label: 'Demand', what: 'Log-scaled search volume, capped at 50k/mo' },
+  visibility: { label: 'Visibility', what: 'How present you already are across channels' },
+  gap: { label: 'Gap', what: '1 − visibility: the room left to win' },
+  contested: { label: 'Contested', what: 'Share of tracked competitors already present' },
+  difficulty: { label: 'Difficulty', what: 'Keyword difficulty, normalised to 0–1' },
+  score: { label: 'Final score', what: 'The 0–100 opportunity' },
+};
+
 @Component({
   selector: 'app-results',
-  imports: [FormsModule, DecimalPipe, NgxEchartsDirective, Empty, ErrorState, Loading],
-  template: `
-    @if (loading()) {
-      <app-loading />
-    } @else if (error(); as p) {
-      <app-error [problem]="p" (retry)="load()" />
+  imports: [FormsModule, DecimalPipe, Icon, Empty, ErrorState, ScoreMeter, Section, Skeleton],
+  template: `@if (loading()) {
+      <app-skeleton variant="table" />
+    } @else if (error(); as problem) {
+      <app-error [problem]="problem" (retry)="load()" />
     } @else {
-      <div class="section-head">
-        <div>
-          <h2>Visibility landscape</h2>
-          <p>Where your brand appears across measured queries and channels.</p>
-        </div>
-        <div class="actions">
-          <a class="btn small" [href]="api.exportUrl(runId(), 'csv')" download>↓ CSV</a
-          ><a class="btn small" [href]="api.exportUrl(runId(), 'json')" download>↓ JSON</a>
-        </div>
-      </div>
-      @if (!queries().length) {
-        <app-empty
-          title="No visibility data yet"
-          text="This run did not collect query observations. Check the stage trace for the provider’s response before starting another analysis."
-        />
-      } @else {
-        <section class="card">
-          <div class="filters">
-            <div>
-              <label for="entity">Show visibility for</label
-              ><select id="entity" [ngModel]="entity()" (ngModelChange)="entity.set($event)">
-                <option value="brand">Your brand</option>
-                @for (name of competitorNames(); track name) {
-                  <option [value]="name">{{ name }}</option>
-                }
-              </select>
-            </div>
-            <p class="field-help" style="flex:2">
-              Visible = presence recorded · Absent = measured but not present · — = no observation
-            </p>
+      <div class="space-y-4">
+        <!-- ========== Visibility matrix ========== -->
+        <app-section
+          title="Visibility matrix"
+          [subtitle]="
+            queries().length
+              ? queries().length + ' queries measured across ' + channels.length + ' channels'
+              : 'No observations collected'
+          "
+        >
+          <div toolbar>
+            <a class="btn-secondary btn-sm" [href]="api.exportUrl(runId(), 'csv')" download>
+              <app-icon name="download" [size]="12" /> CSV
+            </a>
+            <a class="btn-secondary btn-sm" [href]="api.exportUrl(runId(), 'json')" download>
+              <app-icon name="download" [size]="12" /> JSON
+            </a>
           </div>
-          <div
-            echarts
-            class="chart"
-            [style.height.px]="Math.max(250, queries().length * 35 + 95)"
-            [options]="heatmap()"
-            aria-label="Visibility matrix chart"
-          ></div>
-          <details>
-            <summary>View accessible data table and citations</summary>
-            <div class="table-scroll">
-              <table>
+
+          @if (!queries().length) {
+            <app-empty
+              icon="eye-off"
+              title="No visibility data in this run"
+              text="No query observations were stored, so there is nothing to plot. The stage trace records exactly what each provider returned."
+            />
+          } @else {
+            <!-- Entity switcher -->
+            <div
+              class="flex flex-wrap items-center gap-x-3 gap-y-2 border-b-hairline border-stroke-200 px-4 py-3"
+            >
+              <span class="eyebrow">Showing</span>
+              <div
+                class="inline-flex flex-wrap items-center gap-1 rounded-8 border-hairline border-stroke-200 bg-surface-50 p-1"
+                role="group"
+                aria-label="Whose visibility to show"
+              >
+                <button type="button" [class]="pillCls('brand')" (click)="entity.set('brand')">
+                  Your brand
+                </button>
+                @for (name of competitorNames(); track name) {
+                  <button type="button" [class]="pillCls(name)" (click)="entity.set(name)">
+                    {{ name }}
+                  </button>
+                }
+              </div>
+
+              <p
+                class="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1 text-label-xs text-ink-400"
+              >
+                <span class="flex items-center gap-1.5">
+                  <span class="h-2.5 w-2.5 rounded-[3px] bg-chart-1"></span>visible
+                </span>
+                <span class="flex items-center gap-1.5">
+                  <span class="h-2.5 w-2.5 rounded-[3px] bg-surface-200"></span>absent
+                </span>
+                <span class="flex items-center gap-1.5">
+                  <span
+                    class="h-2.5 w-2.5 rounded-[3px] border-hairline border-dashed border-stroke-300"
+                  ></span
+                  >not measured
+                </span>
+              </p>
+            </div>
+
+            <!-- A real table, so screen readers can read it and no cell depends
+                 on colour alone — each one also carries a glyph. -->
+            <div class="overflow-x-auto">
+              <table class="w-full border-separate border-spacing-0 text-left">
+                <caption class="sr-only">
+                  Visibility of
+                  {{
+                    entity() === 'brand' ? 'your brand' : entity()
+                  }}
+                  per query and channel
+                </caption>
                 <thead>
                   <tr>
-                    <th>Query</th>
+                    <th
+                      scope="col"
+                      class="sticky left-0 z-10 min-w-[240px] bg-surface-0 px-4 py-2.5 text-label-xs font-medium uppercase tracking-[0.06em] text-ink-400"
+                    >
+                      Query
+                    </th>
                     @for (c of channels; track c.key) {
-                      <th>{{ c.label }}</th>
+                      <th
+                        scope="col"
+                        class="w-[86px] px-1 py-2.5 text-center text-label-xs font-medium text-ink-600"
+                      >
+                        <span class="hidden sm:inline">{{ c.label }}</span>
+                        <span class="sm:hidden">{{ c.short }}</span>
+                      </th>
                     }
-                    <th>Competitors & sources</th>
+                    <th
+                      scope="col"
+                      class="w-[92px] px-3 py-2.5 text-right text-label-xs font-medium uppercase tracking-[0.06em] text-ink-400"
+                    >
+                      Volume
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   @for (q of queries(); track q.id) {
-                    <tr>
-                      <td>{{ q.text }}</td>
-                      @for (c of channels; track c.key) {
-                        <td [class.measured]="presence(q, c.key) === 1">
-                          {{
-                            presence(q, c.key) === null
-                              ? '—'
-                              : presence(q, c.key)
-                                ? 'Visible'
-                                : 'Absent'
-                          }}
+                    <tr class="group">
+                      <th
+                        scope="row"
+                        class="sticky left-0 z-10 border-t-hairline border-stroke-200 bg-surface-0 px-4 py-2 font-normal group-hover:bg-surface-50"
+                      >
+                        <span class="block truncate text-label-sm font-medium text-ink-950">{{
+                          q.text
+                        }}</span>
+                        <span class="mt-0.5 flex items-center gap-1.5">
+                          <span class="badge-neutral">{{ q.source.replaceAll('_', ' ') }}</span>
+                          @if (q.intent) {
+                            <span class="text-label-xs text-ink-400">{{ q.intent }}</span>
+                          }
+                        </span>
+                      </th>
+                      @for (c of channels; track c.key; let i = $index) {
+                        <td
+                          class="border-t-hairline border-stroke-200 px-1 py-2 text-center align-middle group-hover:bg-surface-50"
+                        >
+                          @switch (presence(q, c.key)) {
+                            @case (1) {
+                              <span
+                                class="inline-grid h-7 w-full max-w-[72px] place-items-center rounded-6 text-white"
+                                [style.background]="channelColor(i)"
+                                [title]="cellTitle(q, c.label, 1)"
+                              >
+                                <app-icon name="check" [size]="14" />
+                                <span class="sr-only">visible</span>
+                              </span>
+                            }
+                            @case (0) {
+                              <span
+                                class="inline-grid h-7 w-full max-w-[72px] place-items-center rounded-6 bg-surface-200 text-ink-400"
+                                [title]="cellTitle(q, c.label, 0)"
+                              >
+                                <app-icon name="minus" [size]="14" />
+                                <span class="sr-only">absent</span>
+                              </span>
+                            }
+                            @default {
+                              <span
+                                class="inline-grid h-7 w-full max-w-[72px] place-items-center rounded-6 border-hairline border-dashed border-stroke-300 text-label-xs text-ink-400"
+                                [title]="cellTitle(q, c.label, null)"
+                              >
+                                <span aria-hidden="true">&middot;</span>
+                                <span class="sr-only">not measured</span>
+                              </span>
+                            }
+                          }
                         </td>
                       }
-                      <td>
-                        @for (o of q.observations; track $index) {
-                          <div class="small-text">
-                            {{ o.channel.replaceAll('_', ' ') }}:
-                            {{ o.competitors_visible.join(', ') || 'No competitors recorded' }}
-                            @for (url of o.cited_urls; track $index) {
-                              @if (safeUrl(url)) {
-                                <div>
-                                  <a [href]="url" target="_blank" rel="noopener noreferrer">{{
-                                    url
-                                  }}</a>
-                                </div>
-                              }
-                            }
-                          </div>
+                      <td
+                        class="tnum border-t-hairline border-stroke-200 px-3 py-2 text-right text-label-sm text-ink-600 group-hover:bg-surface-50"
+                      >
+                        @if (q.search_volume !== null) {
+                          {{ q.search_volume | number }}
+                        } @else {
+                          <span class="text-ink-400">&mdash;</span>
                         }
                       </td>
                     </tr>
@@ -119,226 +211,415 @@ const CHANNELS = [
                 </tbody>
               </table>
             </div>
-          </details>
-        </section>
-      }
-      <div class="section-head">
-        <div>
-          <h2>Find your next move</h2>
-          <p>Ranked gaps, grounded in demand and competitive evidence.</p>
-        </div>
-        <span class="eyebrow">{{ opportunities().length }} opportunities</span>
-      </div>
-      <section class="card">
-        <form class="filters" (ngSubmit)="filter()">
-          <div>
-            <label for="search">Search queries</label
-            ><input
-              id="search"
-              name="search"
-              [(ngModel)]="search"
-              placeholder="Find an opportunity…"
-            />
-          </div>
-          <div>
-            <label for="minimum">Minimum score</label
-            ><input
-              id="minimum"
-              name="minimum"
-              type="number"
-              min="0"
-              max="100"
-              [(ngModel)]="minimum"
-            />
-          </div>
-          <div>
-            <label for="intent">Intent</label
-            ><select id="intent" name="intent" [(ngModel)]="intent">
-              <option value="">All intents</option>
-              @for (i of intents(); track i) {
-                <option [value]="i">{{ i }}</option>
-              }
-            </select>
-          </div>
-          <div>
-            <label for="channel">Channel</label
-            ><select id="channel" name="channel" [(ngModel)]="channel">
-              <option value="">All channels</option>
-              @for (c of channels; track c.key) {
-                <option [value]="c.key">{{ c.label }}</option>
-              }
-            </select>
-          </div>
-          <div>
-            <label for="sort">Sort</label
-            ><select id="sort" name="sort" [(ngModel)]="sort">
-              <option value="score_desc">Highest score</option>
-              <option value="score_asc">Lowest score</option>
-            </select>
-          </div>
-          <button class="btn primary" type="submit" [disabled]="filtering()">
-            {{ filtering() ? 'Filtering…' : 'Apply' }}
-          </button>
-        </form>
-        @if (filterError(); as p) {
-          <app-error [problem]="p" (retry)="filter()" />
-        }
-        @if (!opportunities().length) {
-          <app-empty
-            title="No matching opportunities"
-            text="Try a broader filter, or check the trace if this analysis did not collect enough data."
-          />
-        } @else {
-          <div class="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Rank</th>
-                  <th>Search query</th>
-                  <th>Opportunity score</th>
-                  <th>Evidence</th>
-                </tr>
-              </thead>
-              <tbody>
-                @for (o of opportunities(); track o.id) {
-                  <tr>
-                    <td class="muted">{{ o.rank.toString().padStart(2, '0') }}</td>
-                    <td>
-                      <button class="text-link" (click)="selected.set(o); scoreDialog.showModal()">
-                        {{ o.query_text }}
-                      </button>
-                    </td>
-                    <td>
-                      <span class="score">{{ o.score | number: '1.1-1' }}</span
-                      ><span class="muted"> / 100</span>
-                    </td>
-                    <td>
-                      <button class="btn small" (click)="selected.set(o); scoreDialog.showModal()">
-                        Score breakdown ↗
-                      </button>
-                    </td>
-                  </tr>
+
+            <!-- Competitors and cited sources, behind a disclosure so the
+                 matrix above stays scannable. -->
+            <details class="group border-t-hairline border-stroke-200">
+              <summary
+                class="flex cursor-pointer select-none items-center gap-1.5 px-4 py-3 text-label-sm font-medium text-ink-600 transition-colors duration-150 hover:text-ink-950"
+              >
+                <app-icon
+                  name="chevron-right"
+                  [size]="14"
+                  class="transition-transform duration-150 group-open:rotate-90"
+                />
+                Competitors seen and sources cited
+              </summary>
+              <ul class="divide-y-hairline divide-stroke-200 border-t-hairline border-stroke-200">
+                @for (q of queries(); track q.id) {
+                  <li class="px-4 py-3">
+                    <p class="text-label-sm font-medium text-ink-950">{{ q.text }}</p>
+                    <ul class="mt-1.5 space-y-1.5">
+                      @for (o of q.observations; track $index) {
+                        <li class="text-label-xs leading-[16px]">
+                          <span class="font-medium text-ink-700">{{
+                            channelLabel(o.channel)
+                          }}</span>
+                          <span class="text-ink-600">
+                            &middot;
+                            @if (o.brand_visible) {
+                              you are visible{{
+                                o.brand_position !== null ? ' at position ' + o.brand_position : ''
+                              }}
+                            } @else {
+                              you are absent
+                            }
+                            @if (o.competitors_visible.length) {
+                              &middot; competitors: {{ o.competitors_visible.join(', ') }}
+                            }
+                          </span>
+                          @for (url of o.cited_urls; track $index) {
+                            @if (safeUrl(url)) {
+                              <a
+                                [href]="url"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                class="link mt-0.5 block truncate"
+                                >{{ url }}</a
+                              >
+                            }
+                          }
+                        </li>
+                      } @empty {
+                        <li class="text-label-xs text-ink-400">No observations for this query.</li>
+                      }
+                    </ul>
+                  </li>
                 }
-              </tbody>
-            </table>
+              </ul>
+            </details>
+          }
+        </app-section>
+
+        <!-- ========== Opportunities ========== -->
+        <app-section
+          title="Opportunities"
+          [subtitle]="opportunities().length + ' scored gaps, biggest first'"
+        >
+          <form
+            class="flex flex-wrap items-end gap-2.5 border-b-hairline border-stroke-200 px-4 py-3"
+            (ngSubmit)="filter()"
+          >
+            <div class="min-w-[170px] flex-1">
+              <label class="field-label" for="search">Search</label>
+              <div class="relative">
+                <span
+                  class="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
+                >
+                  <app-icon name="search" [size]="14" />
+                </span>
+                <input
+                  id="search"
+                  name="search"
+                  [(ngModel)]="search"
+                  placeholder="Filter queries…"
+                  class="input pl-8"
+                />
+              </div>
+            </div>
+            <div class="w-[104px]">
+              <label class="field-label" for="minimum">Min score</label>
+              <input
+                id="minimum"
+                name="minimum"
+                type="number"
+                min="0"
+                max="100"
+                [(ngModel)]="minimum"
+                class="input tnum"
+                placeholder="0"
+              />
+            </div>
+            <div class="w-[140px]">
+              <label class="field-label" for="intent">Intent</label>
+              <select id="intent" name="intent" [(ngModel)]="intent" class="input">
+                <option value="">All intents</option>
+                @for (i of intents(); track i) {
+                  <option [value]="i">{{ i }}</option>
+                }
+              </select>
+            </div>
+            <div class="w-[150px]">
+              <label class="field-label" for="channel">Channel</label>
+              <select id="channel" name="channel" [(ngModel)]="channel" class="input">
+                <option value="">All channels</option>
+                @for (c of channels; track c.key) {
+                  <option [value]="c.key">{{ c.label }}</option>
+                }
+              </select>
+            </div>
+            <div class="w-[140px]">
+              <label class="field-label" for="sort">Sort</label>
+              <select id="sort" name="sort" [(ngModel)]="sort" class="input">
+                <option value="score_desc">Highest score</option>
+                <option value="score_asc">Lowest score</option>
+              </select>
+            </div>
+            <button class="btn-secondary" type="submit" [disabled]="filtering()">
+              @if (filtering()) {
+                <app-icon name="spinner" [size]="14" /> Filtering…
+              } @else {
+                <app-icon name="filter" [size]="14" /> Apply
+              }
+            </button>
+          </form>
+
+          @if (filterError(); as problem) {
+            <div class="p-4"><app-error [problem]="problem" (retry)="filter()" /></div>
+          }
+
+          @if (!opportunities().length) {
+            <app-empty
+              icon="target"
+              title="No matching opportunities"
+              text="Widen the filters, or open the trace if this run did not collect enough data to score."
+            />
+          } @else {
+            <div class="overflow-x-auto">
+              <table class="tbl tbl-interactive">
+                <thead>
+                  <tr>
+                    <th class="w-12 text-right">#</th>
+                    <th class="min-w-[240px]">Query</th>
+                    <th class="w-[190px]">Opportunity</th>
+                    <th class="min-w-[240px]">Why this gap exists</th>
+                    <th class="w-10"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (o of opportunities(); track o.id) {
+                    <tr
+                      tabindex="0"
+                      (click)="selected.set(o)"
+                      (keydown.enter)="selected.set(o)"
+                      (keydown.space)="selected.set(o)"
+                    >
+                      <td class="tnum text-right text-ink-400">
+                        {{ o.rank.toString().padStart(2, '0') }}
+                      </td>
+                      <td class="font-medium text-ink-950">{{ o.query_text }}</td>
+                      <td><app-score-meter [score]="o.score" /></td>
+                      <td class="text-label-xs leading-[16px] text-ink-600">
+                        {{ o.explanation || 'No explanation was recorded for this gap.' }}
+                      </td>
+                      <td class="text-right text-ink-400">
+                        <app-icon name="chevron-right" [size]="16" />
+                      </td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+            <p
+              class="flex items-center gap-1.5 border-t-hairline border-stroke-200 px-4 py-2.5 text-label-xs text-ink-400"
+            >
+              <app-icon name="info" [size]="12" /> Open any row for the full score breakdown. A
+              higher score means a bigger winnable gap.
+            </p>
+          }
+        </app-section>
+
+        <!-- ========== Recommendations ========== -->
+        <app-section
+          title="Recommendations"
+          [subtitle]="recommendations().length + ' content actions for the top opportunities'"
+        >
+          @if (actionError(); as problem) {
+            <div class="p-4">
+              <app-error [problem]="problem" (retry)="actionError.set(null)" />
+            </div>
+          }
+
+          @if (!recommendations().length) {
+            <app-empty
+              icon="sparkles"
+              title="No recommendations in this run"
+              text="A run needs scored opportunities and a successful recommender stage before it can propose content."
+            />
+          } @else {
+            <div class="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-4">
+              @for (column of columns; track column.key) {
+                <section class="flex min-w-0 flex-col gap-2.5">
+                  <header
+                    class="flex items-center justify-between gap-2 border-b-hairline border-stroke-200 pb-2"
+                  >
+                    <h3 class="flex items-center gap-1.5 text-label-sm font-semibold text-ink-950">
+                      <app-icon [name]="column.icon" [size]="14" />
+                      {{ column.label }}
+                    </h3>
+                    <span class="tnum badge-neutral">{{ byStatus(column.key).length }}</span>
+                  </header>
+
+                  @for (r of byStatus(column.key); track r.id) {
+                    <article
+                      class="rounded-8 border-hairline border-stroke-200 bg-surface-0 p-3 shadow-card transition-shadow duration-150 hover:shadow-raised"
+                      [class.opacity-50]="updating().includes(r.id)"
+                    >
+                      <div class="mb-1.5 flex flex-wrap items-center gap-1.5">
+                        <span class="badge-brand">{{ r.content_type.replaceAll('_', ' ') }}</span>
+                        @if (r.priority) {
+                          <span [class]="priorityCls(r.priority)">{{ r.priority }}</span>
+                        }
+                        @if (r.effort) {
+                          <span class="badge-neutral">{{ r.effort }} effort</span>
+                        }
+                      </div>
+
+                      <h4 class="text-label-sm font-semibold leading-[20px] text-ink-950">
+                        {{ r.title }}
+                      </h4>
+
+                      @if (r.target_query) {
+                        <p class="mt-1.5 flex items-center gap-1.5 text-label-xs text-ink-600">
+                          <app-icon name="target" [size]="12" />
+                          <span class="min-w-0 truncate">{{ r.target_query }}</span>
+                        </p>
+                      }
+
+                      @if (r.rationale) {
+                        <p class="mt-1.5 text-label-xs leading-[16px] text-ink-600">
+                          {{ r.rationale }}
+                        </p>
+                      }
+
+                      @if (r.outline?.length) {
+                        <details class="group mt-2">
+                          <summary
+                            class="inline-flex cursor-pointer select-none items-center gap-1 text-label-xs font-medium text-ink-600 hover:text-ink-950"
+                          >
+                            <app-icon
+                              name="chevron-right"
+                              [size]="12"
+                              class="transition-transform duration-150 group-open:rotate-90"
+                            />
+                            Outline
+                          </summary>
+                          <ol
+                            class="mt-1.5 list-decimal space-y-0.5 pl-4 text-label-xs leading-[16px] text-ink-600"
+                          >
+                            @for (line of r.outline; track $index) {
+                              <li>{{ line }}</li>
+                            }
+                          </ol>
+                        </details>
+                      }
+
+                      <div
+                        class="mt-2.5 flex flex-wrap items-center gap-1 border-t-hairline border-stroke-200 pt-2.5"
+                      >
+                        @for (c of columns; track c.key) {
+                          @if (c.key !== r.status) {
+                            <button
+                              type="button"
+                              class="btn-ghost btn-sm"
+                              (click)="move(r, c.key)"
+                              [disabled]="updating().includes(r.id)"
+                              [attr.aria-label]="'Move ' + r.title + ' to ' + c.label"
+                            >
+                              <app-icon [name]="c.icon" [size]="11" /> {{ c.short }}
+                            </button>
+                          }
+                        }
+                      </div>
+                    </article>
+                  } @empty {
+                    <p
+                      class="rounded-8 border-hairline border-dashed border-stroke-300 px-3 py-6 text-center text-label-xs text-ink-400"
+                    >
+                      Nothing here
+                    </p>
+                  }
+                </section>
+              }
+            </div>
+          }
+        </app-section>
+      </div>
+    }
+
+    <!-- ========== Score breakdown drawer ========== -->
+    @if (selected(); as o) {
+      <div
+        class="fixed inset-0 z-50 flex justify-end"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="score-title"
+      >
+        <button
+          type="button"
+          class="absolute inset-0 bg-ink-950/40 backdrop-blur-[2px]"
+          (click)="selected.set(null)"
+          aria-label="Close score breakdown"
+        ></button>
+
+        <div
+          class="relative flex h-full w-full max-w-[460px] flex-col overflow-y-auto border-l-hairline border-stroke-200 bg-surface-0 shadow-drawer"
+        >
+          <header
+            class="sticky top-0 z-10 flex items-start justify-between gap-3 border-b-hairline border-stroke-200 bg-surface-0/90 px-5 py-4 backdrop-blur-md"
+          >
+            <div class="min-w-0">
+              <p class="eyebrow">Score breakdown &middot; rank {{ o.rank }}</p>
+              <h2 id="score-title" class="mt-1 text-label-lg font-semibold text-ink-950">
+                {{ o.query_text }}
+              </h2>
+            </div>
+            <button
+              type="button"
+              class="btn-ghost btn-icon shrink-0"
+              (click)="selected.set(null)"
+              aria-label="Close"
+            >
+              <app-icon name="x" [size]="16" />
+            </button>
+          </header>
+
+          <div class="space-y-5 px-5 py-5">
+            <div class="flex items-end gap-3">
+              <span class="tnum text-display-lg font-semibold leading-none text-ink-950">{{
+                o.score | number: '1.1-1'
+              }}</span>
+              <span class="pb-1 text-label-sm text-ink-400">/ 100 opportunity</span>
+            </div>
+
+            @if (o.explanation) {
+              <p
+                class="rounded-8 border-hairline border-stroke-200 bg-surface-50 p-3 text-label-sm leading-[20px] text-ink-700"
+              >
+                {{ o.explanation }}
+              </p>
+            }
+
+            <div>
+              <h3 class="eyebrow mb-3">Components</h3>
+              <ul class="space-y-3">
+                @for (c of components(o); track c.key) {
+                  <li>
+                    <div class="flex items-baseline justify-between gap-2">
+                      <span class="text-label-sm font-medium text-ink-950">{{ c.label }}</span>
+                      <span class="tnum text-label-sm text-ink-700">{{ c.display }}</span>
+                    </div>
+                    @if (c.fraction !== null) {
+                      <div class="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-surface-200">
+                        <div
+                          class="h-full rounded-full bg-brand-500"
+                          [style.width.%]="c.fraction * 100"
+                        ></div>
+                      </div>
+                    }
+                    @if (c.what) {
+                      <p class="mt-1 text-label-xs text-ink-400">{{ c.what }}</p>
+                    }
+                  </li>
+                }
+              </ul>
+            </div>
+
+            <div class="rounded-8 border-hairline border-stroke-200 bg-surface-50 p-3">
+              <h3 class="text-label-sm font-semibold text-ink-950">How this is calculated</h3>
+              <code
+                class="tnum mt-2 block overflow-x-auto whitespace-nowrap rounded-6 border-hairline border-stroke-200 bg-surface-0 px-2.5 py-2 text-label-xs text-ink-700"
+              >
+                100 &times; demand &times; gap &times; (0.6 + 0.4 &times; contested) &times; (1
+                &minus; 0.5 &times; difficulty)
+              </code>
+              <p class="mt-2 text-label-xs leading-[16px] text-ink-600">
+                Every input comes from DataForSEO and is combined in Python. The language model
+                never produces or adjusts a number &mdash; it only writes the explanation above.
+              </p>
+            </div>
           </div>
-        }
-        <p class="field-help" style="margin-top:16px">
-          Showing up to 200 opportunities. Higher scores indicate larger remaining gaps.
-        </p>
-      </section>
-      <div class="section-head">
-        <div>
-          <h2>Turn insight into action</h2>
-          <p>Recommendations generated from your measured opportunities.</p>
         </div>
       </div>
-      @if (actionError(); as p) {
-        <app-error [problem]="p" (retry)="actionError.set(null)" />
-      }
-      @if (!recommendations().length) {
-        <app-empty
-          title="Recommendations will appear here"
-          text="A run needs scored opportunities and a successful recommendation stage before it can suggest content actions."
-        />
-      } @else {
-        <div class="board">
-          @for (column of columns; track column.key) {
-            <section class="board-column">
-              <h3>{{ column.label }} · {{ byStatus(column.key).length }}</h3>
-              @for (r of byStatus(column.key); track r.id) {
-                <article class="recommendation">
-                  <span class="eyebrow">{{ r.content_type.replaceAll('_', ' ') }}</span>
-                  <h3>{{ r.title }}</h3>
-                  <p>{{ r.rationale }}</p>
-                  @if (r.target_query) {
-                    <p><strong>Target:</strong> {{ r.target_query }}</p>
-                  }
-                  @if (r.outline?.length) {
-                    <details>
-                      <summary>Content outline</summary>
-                      <ol>
-                        @for (line of r.outline; track $index) {
-                          <li>{{ line }}</li>
-                        }
-                      </ol>
-                    </details>
-                  }
-                  <p>
-                    {{ r.priority || 'Unspecified' }} priority ·
-                    {{ r.effort || 'Unspecified' }} effort
-                  </p>
-                  <label class="small-text" [for]="'status-' + r.id">Move to</label
-                  ><select
-                    [id]="'status-' + r.id"
-                    [ngModel]="r.status"
-                    (ngModelChange)="move(r, $event)"
-                    [disabled]="updating().includes(r.id)"
-                  >
-                    @for (c of columns; track c.key) {
-                      <option [value]="c.key">{{ c.label }}</option>
-                    }
-                  </select>
-                </article>
-              }
-            </section>
-          }
-        </div>
-      }
-    }
-    <dialog
-      #scoreDialog
-      class="score-dialog"
-      (close)="selected.set(null)"
-      aria-labelledby="score-title"
-    >
-      @if (selected(); as o) {
-        <div class="drawer-head">
-          <span class="eyebrow">Explainable by design</span
-          ><button
-            class="btn small"
-            (click)="scoreDialog.close()"
-            aria-label="Close score breakdown"
-          >
-            ✕
-          </button>
-        </div>
-        <h2 id="score-title">{{ o.query_text }}</h2>
-        <p class="score" style="font-size:44px;margin:24px 0">
-          {{ o.score | number: '1.1-1' }}<span class="muted" style="font-size:16px"> / 100</span>
-        </p>
-        <p>
-          {{
-            o.explanation || 'This score is calculated from observed data using the formula below.'
-          }}
-        </p>
-        <h3>Score components</h3>
-        @for (c of components(o); track c.key) {
-          <div class="component-row">
-            <span>{{ c.key }}</span
-            ><strong>{{ c.value }}</strong>
-          </div>
-        }
-        <div class="notice" style="margin-top:24px">
-          <strong>The opportunity formula</strong>
-          <p class="mono">100 × demand × gap × (0.6 + 0.4 × contested) × (1 − 0.5 × difficulty)</p>
-          <p>
-            Demand is log-scaled search volume. Gap is one minus measured visibility. Contested is
-            the share of tracked competitors present. Difficulty is normalized to 0–1.
-          </p>
-        </div>
-      }
-    </dialog>
-  `,
+    }`,
 })
 export class ResultsPanel {
   readonly api = inject(ApiService);
   private readonly destroy = inject(DestroyRef);
-  private readonly theme = inject(ThemeService);
+
   readonly runId = input.required<string>();
-  readonly status = input.required<string>();
+
   readonly channels = CHANNELS;
-  readonly Math = Math;
   readonly queries = signal<VisibilityQuery[]>([]);
   readonly opportunities = signal<Opportunity[]>([]);
   readonly recommendations = signal<Recommendation[]>([]);
@@ -350,19 +631,24 @@ export class ResultsPanel {
   readonly error = signal<Problem | null>(null);
   readonly filterError = signal<Problem | null>(null);
   readonly actionError = signal<Problem | null>(null);
+
   search = '';
   minimum: number | null = null;
   intent = '';
   channel = '';
   sort = 'score_desc';
+
   private filterRequest?: Subscription;
   private loadRequest?: Subscription;
-  readonly columns: { key: RecommendationStatus; label: string }[] = [
-    { key: 'todo', label: 'To do' },
-    { key: 'in_progress', label: 'In progress' },
-    { key: 'done', label: 'Done' },
-    { key: 'dismissed', label: 'Dismissed' },
-  ];
+
+  readonly columns: { key: RecommendationStatus; label: string; short: string; icon: IconName }[] =
+    [
+      { key: 'todo', label: 'To do', short: 'To do', icon: 'target' },
+      { key: 'in_progress', label: 'In progress', short: 'Start', icon: 'play' },
+      { key: 'done', label: 'Done', short: 'Done', icon: 'check' },
+      { key: 'dismissed', label: 'Dismissed', short: 'Dismiss', icon: 'x' },
+    ];
+
   readonly competitorNames = computed(() =>
     [
       ...new Set(
@@ -370,6 +656,7 @@ export class ResultsPanel {
       ),
     ].sort(),
   );
+
   readonly intents = computed(() =>
     [
       ...new Set(
@@ -379,76 +666,43 @@ export class ResultsPanel {
       ),
     ].sort(),
   );
-  readonly heatmap = computed<EChartsCoreOption>(() => ({
-    aria: { enabled: true },
-    animation: false,
-    textStyle: { color: this.theme.dark() ? '#a3acc1' : '#70778a', fontFamily: 'system-ui' },
-    grid: { left: 190, right: 20, top: 10, bottom: 60 },
-    tooltip: {
-      formatter: (value: unknown) => {
-        const item = value as { value?: number[] };
-        const v = item.value;
-        return v ? `${CHANNELS[v[0]].label}: ${v[2] ? 'Visible' : 'Absent'}` : '';
-      },
-    },
-    xAxis: {
-      type: 'category',
-      data: CHANNELS.map((c) => c.label),
-      axisLine: { show: false },
-      axisTick: { show: false },
-      splitArea: { show: false },
-      axisLabel: { fontSize: 10, interval: 0 },
-    },
-    yAxis: {
-      type: 'category',
-      data: this.queries().map((q) => q.text),
-      inverse: true,
-      axisLine: { show: false },
-      axisTick: { show: false },
-      axisLabel: { width: 170, overflow: 'truncate', fontSize: 11 },
-    },
-    visualMap: {
-      type: 'piecewise',
-      orient: 'horizontal',
-      left: 'center',
-      bottom: 0,
-      pieces: [
-        { value: 0, label: 'Measured absence', color: this.theme.dark() ? '#30374b' : '#e5e8ef' },
-        { value: 1, label: 'Visible', color: '#7770ed' },
-      ],
-      textStyle: { color: this.theme.dark() ? '#a3acc1' : '#70778a' },
-    },
-    series: [
-      {
-        type: 'heatmap',
-        label: {
-          show: true,
-          formatter: (value: unknown) => {
-            const v = value as { value: number[] };
-            return v.value[2] ? '✓' : '–';
-          },
-          color: this.theme.dark() ? '#fff' : '#202437',
-        },
-        itemStyle: {
-          borderWidth: 5,
-          borderColor: this.theme.dark() ? '#1a1e2d' : '#fff',
-          borderRadius: 7,
-        },
-        data: this.queries().flatMap((q, y) =>
-          CHANNELS.flatMap((c, x) => {
-            const p = this.presence(q, c.key);
-            return p === null ? [] : [[x, y, p]];
-          }),
-        ),
-      },
-    ],
-  }));
+
   constructor() {
     effect(() => {
       this.runId();
       this.load();
     });
   }
+
+  /** Channel colour, read from the same tokens the charts use. */
+  channelColor(index: number) {
+    return `rgb(var(--chart-${(index % 4) + 1}))`;
+  }
+
+  channelLabel(key: string) {
+    return CHANNELS.find((c) => c.key === key)?.label ?? key.replaceAll('_', ' ');
+  }
+
+  pillCls(value: string) {
+    const base = 'rounded-6 px-2.5 py-1 text-label-xs font-medium transition-colors duration-150';
+    return this.entity() === value
+      ? `${base} bg-surface-0 text-ink-950 shadow-card`
+      : `${base} text-ink-600 hover:text-ink-950`;
+  }
+
+  priorityCls(priority: string) {
+    const p = priority.toLowerCase();
+    if (p === 'high') return 'badge-danger';
+    if (p === 'medium') return 'badge-warning';
+    return 'badge-neutral';
+  }
+
+  cellTitle(q: VisibilityQuery, channel: string, state: number | null) {
+    const who = this.entity() === 'brand' ? 'Your brand' : this.entity();
+    if (state === null) return `${channel} was not measured for "${q.text}"`;
+    return `${who} ${state ? 'is visible' : 'is absent'} on ${channel} for "${q.text}"`;
+  }
+
   load() {
     this.loadRequest?.unsubscribe();
     this.loading.set(true);
@@ -472,6 +726,8 @@ export class ResultsPanel {
         },
       });
   }
+
+  /** 1 = visible, 0 = measured but absent, null = never measured. */
   presence(q: VisibilityQuery, channel: string): number | null {
     const observations = q.observations.filter((o) => o.channel === channel);
     if (!observations.length) return null;
@@ -481,6 +737,7 @@ export class ResultsPanel {
       ? 1
       : 0;
   }
+
   safeUrl(url: string) {
     try {
       return ['https:', 'http:'].includes(new URL(url).protocol);
@@ -488,6 +745,7 @@ export class ResultsPanel {
       return false;
     }
   }
+
   filter() {
     if (this.minimum !== null && (this.minimum < 0 || this.minimum > 100)) return;
     this.filterRequest?.unsubscribe();
@@ -512,9 +770,11 @@ export class ResultsPanel {
         },
       });
   }
+
   byStatus(status: RecommendationStatus) {
     return this.recommendations().filter((r) => r.status === status);
   }
+
   move(r: Recommendation, status: RecommendationStatus) {
     this.updating.update((ids) => [...ids, r.id]);
     this.actionError.set(null);
@@ -534,10 +794,23 @@ export class ResultsPanel {
         },
       });
   }
+
   components(o: Opportunity) {
-    return Object.entries(o.components).map(([key, value]) => ({
-      key: key.replaceAll('_', ' '),
-      value: typeof value === 'number' ? value.toFixed(4) : JSON.stringify(value),
-    }));
+    const order = ['demand', 'gap', 'visibility', 'contested', 'difficulty', 'score'];
+    return Object.entries(o.components)
+      .sort(([a], [b]) => order.indexOf(a) - order.indexOf(b))
+      .map(([key, value]) => {
+        const meta = COMPONENT_COPY[key];
+        const numeric = typeof value === 'number' ? value : null;
+        return {
+          key,
+          label: meta?.label ?? key.replaceAll('_', ' '),
+          what: meta?.what ?? '',
+          display: numeric === null ? JSON.stringify(value) : numeric.toFixed(4),
+          // `score` is 0–100; every other component is a 0–1 ratio.
+          fraction:
+            numeric === null ? null : key === 'score' ? numeric / 100 : Math.min(1, numeric),
+        };
+      });
   }
 }
