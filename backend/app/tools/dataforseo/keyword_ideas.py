@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 from app.llm.types import ToolSpec
 from app.tools.dataforseo.client import DataForSEOClient
 from app.tools.dataforseo.errors import ToolArgumentError
+from app.tools.dataforseo.pricing import estimate_keyword_ideas_cost
 
 ENDPOINT = "/v3/dataforseo_labs/google/keyword_ideas/live"
 
@@ -60,7 +61,7 @@ def keyword_ideas(
             "limit": args.limit,
         }
     ]
-    task = client.post(ENDPOINT, payload)
+    task = client.post(ENDPOINT, payload, estimated_cost=estimate_keyword_ideas_cost(args.limit))
     result0 = (task.get("result") or [{}])[0]
     items = []
     for item in result0.get("items") or []:

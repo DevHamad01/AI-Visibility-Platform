@@ -23,6 +23,7 @@ from app.llm.types import ToolSpec
 from app.tools.dataforseo._json_utils import collect_strings_by_key, find_items_by_type_substring
 from app.tools.dataforseo.client import DataForSEOClient
 from app.tools.dataforseo.errors import ToolArgumentError
+from app.tools.dataforseo.pricing import estimate_serp_google_organic_cost
 
 ENDPOINT = "/v3/serp/google/organic/live/advanced"
 
@@ -84,7 +85,7 @@ def serp_google_organic(
             "load_async_ai_overview": args.load_async_ai_overview,
         }
     ]
-    task = client.post(ENDPOINT, payload)
+    task = client.post(ENDPOINT, payload, estimated_cost=estimate_serp_google_organic_cost())
     result0 = (task.get("result") or [{}])[0]
     items = result0.get("items") or []
 

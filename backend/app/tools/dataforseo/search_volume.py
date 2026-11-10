@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, ValidationError
 from app.llm.types import ToolSpec
 from app.tools.dataforseo.client import DataForSEOClient
 from app.tools.dataforseo.errors import ToolArgumentError
+from app.tools.dataforseo.pricing import estimate_search_volume_cost
 
 ENDPOINT = "/v3/keywords_data/google_ads/search_volume/live"
 
@@ -58,7 +59,7 @@ def search_volume(client: DataForSEOClient, raw_args: dict) -> SearchVolumeResul
             "language_code": args.language_code,
         }
     ]
-    task = client.post(ENDPOINT, payload)
+    task = client.post(ENDPOINT, payload, estimated_cost=estimate_search_volume_cost())
     items = [
         SearchVolumeItem(
             keyword=row.get("keyword", ""),
