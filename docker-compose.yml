@@ -44,7 +44,7 @@ services:
       redis:
         condition: service_healthy
     command: >
-      sh -c "alembic upgrade head && exec gunicorn --bind 0.0.0.0:8000 --workers 2 --access-logfile - app.wsgi:app"
+      sh -c "alembic upgrade head && exec gunicorn --bind 0.0.0.0:8000 --workers 2 --worker-class gthread --threads 8 --timeout 660 --access-logfile - app.wsgi:app"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       interval: 5s
@@ -66,9 +66,15 @@ services:
         condition: service_healthy
     command: ["python", "-m", "app.worker.main"]
 
-  # frontend:
-  #   Angular app, built in Phase 4. Multi-stage Docker build (Node -> nginx),
-  #   nginx proxies /api to the `api` service, published on host port 4200.
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-4200}:80"
+    depends_on:
+      api:
+        condition: service_healthy
 
 volumes:
   db_data:

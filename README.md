@@ -159,7 +159,7 @@ The frontend (`http://localhost:4200`) is added in Phase 4.
 
 ## Known limitations / next steps
 
-- The frontend is not built yet (Phase 4).
+- Populated frontend results still need a successful live provider run; no success data is fabricated.
 - `make test` recreates its own Postgres database (`<db>_test`) on the same `db`
   service; it does not touch the application database.
 - DataForSEO's AI Overview / People Also Ask response shapes are parsed defensively
@@ -193,4 +193,31 @@ The frontend (`http://localhost:4200`) is added in Phase 4.
 ## AI tools used
 
 Claude Code (Anthropic) was used for scaffolding, implementation and tests, under
-the author's direction and review.
+the author's direction and review. OpenAI Codex was used to continue frontend implementation, verification and final hardening after the Claude Code session.
+## Phase 4 — Signal frontend
+
+The Angular workspace is implemented in `frontend/`; its visual direction is recorded in
+`docs/design-direction.md`. It includes portfolio overview, brand setup/settings, brand
+history/trend, live SSE progress with polling fallback, stage trace, query/channel visibility
+heatmap and text/citation table, filtered opportunities with score drawer, recommendation
+status board, CSV/JSON export and two-run comparison. Appearance follows system preference
+until explicitly selected, with a persisted light/dark toggle.
+
+Run everything with `docker compose up --build`, then open http://localhost:4200.
+For a local frontend developer session (Node 22.22.3+): `cd frontend`, `npm ci`, `npm start`.
+The development proxy forwards `/api` to the already-running backend on port 8000.
+The production container builds with Node 22 and serves nginx. Its SSE location disables
+buffering and allows a 660-second read timeout. Gunicorn uses threaded workers so open event
+streams do not occupy every request slot.
+
+Verification on 2026-11-10: production frontend build and formatting check passed; 14 frontend
+tests passed. Browser checks used the real running backend: created Linear (`linear.app`)
+with Asana and Monday.com, checked validation, history/trend empty states, existing failed-run
+results and trace, comparison empty state, and 1280/768 layouts in both themes. No mock data
+was added to the running app. The live provider check still returned HTTP 403 / 40104
+(account verification required), cost $0; the free account lookup reported a $1 balance.
+Successful populated results/partial states are implemented against the API schema but await
+live provider verification. Docker rebuild and container-based regression tests could not run
+from the Codex desktop sandbox because access to Docker Desktop's named pipe was denied.
+The local Angular server was left running on port 4200 against the existing backend.
+
