@@ -132,9 +132,28 @@ Numbers come from DataForSEO and Python, never an LLM.
 ## Providers, cost and resilience
 
 `LLM_CHAIN` configures the ordered provider/model chain. Development used
-`groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite`. OpenAI and Anthropic are first-class
-providers: set their key and corresponding `provider:model` entry to switch. Empty-key
-providers are skipped. Model availability and quotas depend on the account.
+`groq:openai/gpt-oss-120b,gemini:gemini-3.5-flash-lite` (both free tiers, since the brief's
+own DataForSEO/LLM budget is a $1 trial). OpenAI and Anthropic are first-class providers —
+agents call a thin `LLMClient` interface and never import a provider SDK, so switching is
+config only, not a code change. To switch: set the key, then set `LLM_CHAIN` to that
+provider, e.g.
+
+```sh
+# OpenAI only
+OPENAI_API_KEY=sk-...
+LLM_CHAIN=openai:gpt-4.1-mini
+
+# Anthropic only
+ANTHROPIC_API_KEY=sk-ant-...
+LLM_CHAIN=anthropic:claude-sonnet-5
+
+# Anthropic primary, OpenAI fallback if it exhausts retries or its circuit opens
+LLM_CHAIN=anthropic:claude-sonnet-5,openai:gpt-4.1-mini
+```
+
+Empty-key providers are skipped automatically. Model ids change often — verify the current
+id against the provider's docs before relying on it; the ids above were confirmed working at
+the time of writing. Model availability and quotas depend on the account.
 
 Agents use `LLMClient.complete_structured` and `call_tools`, with JSON parsing, Pydantic
 validation, one repair attempt and ordered fallback. No provider-native strict structured
@@ -212,8 +231,20 @@ docker compose run --rm -e DEMO_FAIL_SERP=true api python -m app.pipeline.failur
 Normal workers remain unchanged. Other provider calls remain real and budgeted; use a verified
 account for meaningful partial results. CI separately runs an automated mocked-provider pipeline
 failure test and uploads its actual emitted logs as the `simulated-failure-trace` artifact.
-Mocks exist only in automated tests. This one-off live demonstration has not been run from
-the Codex sandbox because Docker engine access was denied.
+Mocks exist only in automated tests.
+
+**This was actually run** against the live, still-unverified account — which, combined with the
+forced SERP outage, failed `keyword_retrieval` and `serp_retrieval` in the same parallel
+superstep. That surfaced a real bug: LangGraph's default state channel for `stage_errors` has no
+merge strategy, so two branches writing to the same key in one step raised `InvalidUpdateError`
+and crashed the whole run, discarding the stages that *had* already succeeded — the opposite of
+the "a node failing never discards other branches' work" contract this pipeline is built on. Fixed
+with an `Annotated[dict, reducer]` channel in `backend/app/pipeline/state.py` so concurrent writes
+merge instead of colliding, and covered by
+`test_two_parallel_stage_failures_do_not_crash_the_graph` in `test_pipeline.py`. Re-running the
+same demonstration afterwards ended the run `partial`, with both stage errors recorded and every
+other stage's work intact — confirming the contract actually holds under real concurrent failure,
+not just a single one at a time.
 
 Logs are structured JSON with request/run/trace/node context. Frontend server errors and global
 errors report to a bounded, rate-limited endpoint. Optional Sentry is enabled by `SENTRY_DSN`.
@@ -225,20 +256,30 @@ are not currently aggregated into the API registry. Per-run persisted metrics re
 `.github/workflows/ci.yml` runs frontend formatting/tests/build plus a **fresh full Docker stack**,
 backend lint, regression tests against real Postgres/Redis, a keyless graceful-failure smoke flow,
 SPA/deep-link checks and the simulated-failure log capture. No real provider secrets are needed.
+Status is visible in the repository's Actions tab.
 
-Local Codex verification: frontend production build and formatting passed; 14 frontend tests
-passed. Python 3.12 dependency-isolated tests covered scoring, budgeting/concurrency, charged
-failures, cache namespaces, LLM validation/fallback, planner caps, pricing, SSE cleanup and
-circuit recovery (27 tests). Backend lint, syntax and Compose configuration checks passed.
-Browser checks against the existing backend created Linear with two competitors, exercised
-form validation, existing failed-run results/trace and comparison/history empty states, and
-reviewed 1280px/768px in light and dark mode. Screens contain only actual API data.
+Locally verified end to end, against the real images this repository builds:
 
-Current full integration status is visible in the repository's Actions tab. Local Docker build,
-`make test` and a container clean-checkout run were blocked by the Codex desktop sandbox's
-Docker named-pipe permissions, so their execution is delegated to the committed CI workflow.
-The running local backend still uses the previous image until rebuilt; the Angular developer
-server on port 4200 uses the new frontend. Latest live account check: 403/40104, $0 cost, $1 balance.
+- Backend: 66 tests passed (`docker compose run --rm api pytest -q`), `ruff check` clean.
+- Frontend: 14 tests passed, `prettier --check` clean, production build clean
+  (95 kB initial transfer, routes lazy-split), all inside the `node:22-slim` build stage —
+  not the host's Node, which is older than the toolchain requires.
+- **Clean-checkout test**: cloned the pushed repository into a fresh temp directory (bare
+  `git clone`, nothing carried over), copied in a real `.env`, and ran
+  `docker compose -p signal-clean-checkout up -d --build` on alternate ports so it could run
+  alongside the main stack rather than replacing it. All five containers came up healthy.
+  Created a brand and a competitor, started a run, watched the worker pick it up over
+  Redis/RQ and the pipeline run to a terminal `failed` status (DataForSEO still unverified,
+  $0 spent — the same outcome as the main stack), then confirmed the frontend's SPA deep
+  links (`/runs/<id>`, `/brands/<id>`) and the `/api` proxy both resolve correctly. Torn
+  down afterwards (`down -v` + image removal); the main stack was never stopped.
+- Manual UI pass at 1280px and 768px, light and dark: portfolio, brand setup, live run
+  timeline (SSE + polling fallback), results (visibility matrix, opportunities, score
+  drawer, recommendations board) and compare, using only the two real runs this account
+  has produced. Screens contain only actual API data — no mock or seeded analytics.
+
+Latest live DataForSEO account check: HTTP 403, inner status `40104` (account verification
+required), $0 cost, $1.0000 balance — unchanged since development began.
 
 ## Trade-offs and limitations
 
@@ -261,7 +302,16 @@ server on port 4200 uses the new frontend. Latest live account check: 403/40104,
 
 ## AI tools used
 
-Claude Code (Anthropic) was used for scaffolding, backend implementation and tests. OpenAI Codex
-continued frontend implementation, verification, hardening, CI and documentation. Both operated
-under the author's direction and review. The author remains responsible for understanding and
-defending the design. See `docs/interview-cheat-sheet.md` for a concise interview reference.
+Two assistants were used, both under the author's direction and review at every step; the author
+remains responsible for understanding and defending the design.
+
+- **Claude Code (Anthropic)** — scaffolding and implementation of the backend (API, DB models,
+  the LangGraph pipeline and its nodes, the LLM client and provider fallback, DataForSEO tools,
+  scoring, tests) across the project's early phases, then the frontend's design system and every
+  screen (design tokens, shared UI primitives, portfolio, brand setup, live-run timeline, results,
+  compare), including rebuilding the UI on Tailwind after an initial pass was judged too plain.
+- **OpenAI Codex** — a hardening pass over the backend (budget-reservation concurrency, cache
+  key isolation, circuit-breaker recovery, partial-retrieval retention), the CI workflow, and an
+  initial pass of this README and the interview cheat sheet.
+
+See `docs/interview-cheat-sheet.md` for a concise interview reference.
