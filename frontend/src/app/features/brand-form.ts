@@ -1,17 +1,20 @@
 import { Component, inject, signal } from '@angular/core';
-import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import {
+  AbstractControl,
   FormBuilder,
   ReactiveFormsModule,
-  Validators,
-  AbstractControl,
   ValidationErrors,
+  Validators,
 } from '@angular/forms';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { concatMap, forkJoin, of } from 'rxjs';
 import { ApiService } from '../core/api.service';
-import { Competitor, Problem } from '../core/models';
 import { problemOf } from '../core/errors';
-import { ErrorState, Loading } from '../shared/ui';
+import { Competitor, Problem } from '../core/models';
+import { Icon } from '../shared/icon';
+import { ErrorState, PageHeader, Skeleton } from '../shared/ui';
+
+/** Mirrors the backend's domain rule so the field fails before a round-trip. */
 export function domainValidator(control: AbstractControl): ValidationErrors | null {
   const value = String(control.value || '')
     .trim()
@@ -22,186 +25,276 @@ export function domainValidator(control: AbstractControl): ValidationErrors | nu
     ? null
     : { domain: true };
 }
+
+const MAX_COMPETITORS = 9;
+
 @Component({
-  imports: [RouterLink, ReactiveFormsModule, ErrorState, Loading],
-  template: `
-    <a class="back-link" [routerLink]="id ? ['/brands', id] : ['/']">← Back to workspace</a>
-    <div class="page-head">
-      <div>
-        <span class="eyebrow">Build your competitive picture</span>
-        <h1>{{ id ? 'Brand settings' : 'Add a brand' }}</h1>
-        <p>
-          Tell us who you are and who you compete with. We’ll find where your next visibility
-          opportunity lives.
-        </p>
-      </div>
-    </div>
+  imports: [RouterLink, ReactiveFormsModule, Icon, ErrorState, PageHeader, Skeleton],
+  template: `<a
+      [routerLink]="id ? ['/brands', id] : ['/']"
+      class="mb-5 inline-flex items-center gap-1.5 text-label-sm font-medium text-ink-600 transition-colors duration-150 hover:text-ink-950"
+    >
+      <app-icon name="arrow-left" [size]="14" />
+      {{ id ? 'Back to workspace' : 'Back to overview' }}
+    </a>
+
+    <app-page-header
+      [eyebrow]="id ? 'Brand settings' : 'New brand'"
+      [title]="id ? 'Edit brand' : 'Add a brand'"
+      subtitle="Who you are and who you compete with. The query planner uses this to pick which searches to measure."
+    />
+
     @if (loading()) {
-      <app-loading />
+      <app-skeleton variant="card" />
     } @else {
-      <form [formGroup]="form" (ngSubmit)="save()" class="form-section">
-        @if (error(); as p) {
-          <app-error [problem]="p" (retry)="save()" />
+      <form [formGroup]="form" (ngSubmit)="save()" class="max-w-3xl space-y-4">
+        @if (error(); as problem) {
+          <app-error [problem]="problem" (retry)="save()" />
         }
-        <section class="card">
-          <div class="section-head" style="margin-top:0">
+
+        <!-- 01 · Brand profile -->
+        <section class="card overflow-hidden">
+          <div class="flex items-center gap-3 border-b-hairline border-stroke-200 px-4 py-3">
+            <span
+              class="tnum grid h-6 w-6 place-items-center rounded-6 bg-surface-100 text-label-xs font-semibold text-ink-600"
+              >01</span
+            >
             <div>
-              <h2>01 &nbsp; Brand profile</h2>
-              <p>The starting point for every analysis.</p>
+              <h2 class="panel-title">Brand profile</h2>
+              <p class="mt-0.5 text-label-xs text-ink-400">
+                The starting point for every analysis.
+              </p>
             </div>
           </div>
-          <div class="form-grid">
+
+          <div class="grid gap-4 p-4 sm:grid-cols-2">
             <div>
-              <label for="name">Brand name *</label
-              ><input
+              <label class="field-label" for="name"
+                >Brand name <span class="text-danger-700">*</span></label
+              >
+              <input
                 id="name"
                 formControlName="name"
-                placeholder="Your brand name"
                 maxlength="200"
+                placeholder="Acme Corp"
+                class="input"
+                [class.input-invalid]="invalid('name')"
+                [attr.aria-invalid]="invalid('name')"
               />
               @if (invalid('name')) {
-                <p class="field-error">Enter a brand name.</p>
+                <p class="field-error">
+                  <app-icon name="alert-circle" [size]="12" /> Enter a brand name.
+                </p>
               }
             </div>
+
             <div>
-              <label for="domain">Website domain *</label
-              ><input
+              <label class="field-label" for="domain"
+                >Website domain <span class="text-danger-700">*</span></label
+              >
+              <input
                 id="domain"
                 formControlName="domain"
-                placeholder="example.com"
                 maxlength="255"
+                placeholder="acme.com"
+                class="input"
+                [class.input-invalid]="invalid('domain')"
+                [attr.aria-invalid]="invalid('domain')"
               />
               @if (invalid('domain')) {
-                <p class="field-error">Enter a valid domain, such as example.com.</p>
+                <p class="field-error">
+                  <app-icon name="alert-circle" [size]="12" /> Use a bare domain, like acme.com.
+                </p>
+              } @else {
+                <p class="field-hint">No https:// and no path — just the domain.</p>
               }
             </div>
-            <div class="full">
-              <label for="description">What does your brand do?</label
-              ><textarea
+
+            <div class="sm:col-span-2">
+              <label class="field-label" for="description">What does this brand do?</label>
+              <textarea
                 id="description"
                 formControlName="description"
                 rows="3"
                 maxlength="5000"
-                placeholder="Describe your product, audience and key use cases."
+                placeholder="Describe the product, who buys it, and the problems it solves."
+                class="input resize-y"
               ></textarea>
-              <p class="field-help">This helps the query planner choose relevant searches.</p>
-            </div>
-            <div>
-              <label for="industry">Industry</label
-              ><input
-                id="industry"
-                formControlName="industry"
-                placeholder="e.g. Project management software"
-                maxlength="200"
-              />
-            </div>
-            <div>
-              <label for="language">Language code</label
-              ><input
-                id="language"
-                formControlName="language_code"
-                placeholder="en"
-                maxlength="10"
-              />
-            </div>
-            <div>
-              <label for="location">Location code</label
-              ><input
-                id="location"
-                type="number"
-                formControlName="location_code"
-                min="0"
-                placeholder="Provider default"
-              />
-              <p class="field-help">
-                Optional DataForSEO location code, e.g. 2840 for United States.
+              <p class="field-hint">
+                Used by the planner to choose realistic buyer-intent searches — the more specific,
+                the better the queries.
               </p>
             </div>
+
+            <div>
+              <label class="field-label" for="industry">Industry</label>
+              <input
+                id="industry"
+                formControlName="industry"
+                maxlength="200"
+                placeholder="Project management software"
+                class="input"
+              />
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="field-label" for="language">Language</label>
+                <input
+                  id="language"
+                  formControlName="language_code"
+                  maxlength="10"
+                  placeholder="en"
+                  class="input"
+                />
+              </div>
+              <div>
+                <label class="field-label" for="location">Location</label>
+                <input
+                  id="location"
+                  type="number"
+                  formControlName="location_code"
+                  min="0"
+                  placeholder="2840"
+                  class="input tnum"
+                />
+              </div>
+            </div>
+            <p class="field-hint sm:col-span-2 sm:-mt-2">
+              Location is a DataForSEO code — 2840 is the United States. Leave blank for the
+              provider default.
+            </p>
           </div>
         </section>
-        <section class="card">
-          <div class="section-head" style="margin-top:0">
-            <div>
-              <h2>02 &nbsp; Competitors</h2>
-              <p>Track the brands your audience considers alongside yours.</p>
+
+        <!-- 02 · Competitors -->
+        <section class="card overflow-hidden">
+          <div
+            class="flex flex-wrap items-center justify-between gap-3 border-b-hairline border-stroke-200 px-4 py-3"
+          >
+            <div class="flex items-center gap-3">
+              <span
+                class="tnum grid h-6 w-6 place-items-center rounded-6 bg-surface-100 text-label-xs font-semibold text-ink-600"
+                >02</span
+              >
+              <div>
+                <h2 class="panel-title">Competitors</h2>
+                <p class="mt-0.5 text-label-xs text-ink-400">
+                  Who your buyers compare you against. Drives the “contested” part of each score.
+                </p>
+              </div>
             </div>
             <button
               type="button"
-              class="btn small"
+              class="btn-secondary btn-sm"
               (click)="addCompetitor()"
-              [disabled]="competitors.length + existing().length >= 9"
+              [disabled]="total() >= MAX_COMPETITORS"
             >
-              ＋ Add competitor
+              <app-icon name="plus" [size]="12" /> Add
             </button>
           </div>
-          @if (existing().length) {
-            <p class="field-help">Already tracked</p>
-            <div class="chip-list">
-              @for (c of existing(); track c.id) {
-                <span class="chip">{{ c.name }} · {{ c.domain }}</span>
+
+          <div class="space-y-4 p-4">
+            @if (existing().length) {
+              <div>
+                <p class="eyebrow mb-2">Already tracked</p>
+                <ul class="flex flex-wrap gap-1.5">
+                  @for (c of existing(); track c.id) {
+                    <li
+                      class="inline-flex items-center gap-1.5 rounded-6 border-hairline border-stroke-200 bg-surface-50 px-2 py-1 text-label-xs text-ink-700"
+                    >
+                      <app-icon name="building" [size]="12" />
+                      <span class="font-medium text-ink-950">{{ c.name }}</span>
+                      <span class="text-ink-400">{{ c.domain }}</span>
+                    </li>
+                  }
+                </ul>
+              </div>
+            }
+
+            <div formArrayName="competitors" class="space-y-3">
+              @for (group of competitors.controls; track group; let i = $index) {
+                <div
+                  [formGroupName]="i"
+                  class="rounded-8 border-hairline border-stroke-200 bg-surface-50 p-3"
+                >
+                  <div class="flex items-end gap-3">
+                    <div class="min-w-0 flex-1">
+                      <label class="field-label" [for]="'cname' + i">Name</label>
+                      <input
+                        [id]="'cname' + i"
+                        formControlName="name"
+                        maxlength="200"
+                        placeholder="Monday.com"
+                        class="input"
+                      />
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <label class="field-label" [for]="'cdomain' + i">Domain</label>
+                      <input
+                        [id]="'cdomain' + i"
+                        formControlName="domain"
+                        maxlength="255"
+                        placeholder="monday.com"
+                        class="input"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      class="btn-ghost btn-icon mb-0.5 text-ink-400 hover:text-danger-700"
+                      (click)="competitors.removeAt(i)"
+                      [attr.aria-label]="'Remove competitor ' + (i + 1)"
+                    >
+                      <app-icon name="trash" [size]="14" />
+                    </button>
+                  </div>
+                  @if (group.invalid && group.touched) {
+                    <p class="field-error">
+                      <app-icon name="alert-circle" [size]="12" /> Each competitor needs a name and
+                      a valid domain.
+                    </p>
+                  }
+                </div>
               }
             </div>
-          }
-          <div formArrayName="competitors">
-            @for (group of competitors.controls; track group; let i = $index) {
-              <div class="competitor-row" [formGroupName]="i">
-                <div>
-                  <label [for]="'cname' + i">Competitor name</label
-                  ><input
-                    [id]="'cname' + i"
-                    formControlName="name"
-                    placeholder="Competitor name"
-                    maxlength="200"
-                  />
-                </div>
-                <div>
-                  <label [for]="'cdomain' + i">Domain</label
-                  ><input
-                    [id]="'cdomain' + i"
-                    formControlName="domain"
-                    placeholder="competitor.com"
-                    maxlength="255"
-                  />
-                </div>
-                <button
-                  class="btn small"
-                  type="button"
-                  style="margin-top:26px"
-                  (click)="competitors.removeAt(i)"
-                  [attr.aria-label]="'Remove competitor ' + (i + 1)"
-                >
-                  Remove
-                </button>
-              </div>
-              @if (group.invalid && group.touched) {
-                <p class="field-error">Each competitor needs a name and valid domain.</p>
-              }
+
+            @if (!competitors.length && !existing().length) {
+              <p class="flex items-center gap-1.5 text-label-xs text-ink-400">
+                <app-icon name="info" [size]="12" /> No competitors yet — you can add them now or
+                later from the workspace.
+              </p>
             }
           </div>
-          @if (!competitors.length && !existing().length) {
-            <p class="muted small-text">No competitors yet. You can add them now or later.</p>
-          }
         </section>
-        <div class="form-actions">
-          <a class="btn" [routerLink]="id ? ['/brands', id] : ['/']">Cancel</a
-          ><button class="btn primary" type="submit" [disabled]="saving()">
-            {{ saving() ? 'Saving…' : id ? 'Save changes' : 'Create brand →' }}
+
+        <div class="flex items-center justify-end gap-2 pb-2">
+          <a class="btn-secondary" [routerLink]="id ? ['/brands', id] : ['/']">Cancel</a>
+          <button class="btn-primary" type="submit" [disabled]="saving()">
+            @if (saving()) {
+              <app-icon name="spinner" [size]="14" /> Saving…
+            } @else {
+              {{ id ? 'Save changes' : 'Create brand' }}
+              <app-icon name="arrow-right" [size]="14" />
+            }
           </button>
         </div>
       </form>
-    }
-  `,
+    }`,
 })
 export class BrandFormPage {
   private readonly api = inject(ApiService);
   private readonly fb = inject(FormBuilder);
   private readonly router = inject(Router);
+
   readonly id = inject(ActivatedRoute).snapshot.paramMap.get('id');
   readonly saving = signal(false);
   readonly loading = signal(false);
   readonly error = signal<Problem | null>(null);
   readonly existing = signal<Competitor[]>([]);
+  protected readonly MAX_COMPETITORS = MAX_COMPETITORS;
+
   private createdId: string | null = null;
+
   readonly form = this.fb.group({
     name: ['', [Validators.required, Validators.maxLength(200), Validators.pattern(/\S/)]],
     domain: ['', [Validators.required, domainValidator]],
@@ -211,15 +304,22 @@ export class BrandFormPage {
     location_code: [null as number | null, Validators.min(0)],
     competitors: this.fb.array<ReturnType<BrandFormPage['competitorGroup']>>([]),
   });
+
   get competitors() {
     return this.form.controls.competitors;
   }
+
+  total() {
+    return this.competitors.length + this.existing().length;
+  }
+
   private competitorGroup() {
     return this.fb.group({
       name: ['', [Validators.required, Validators.pattern(/\S/)]],
       domain: ['', [Validators.required, domainValidator]],
     });
   }
+
   constructor() {
     if (this.id) {
       this.loading.set(true);
@@ -248,16 +348,20 @@ export class BrandFormPage {
       this.addCompetitor();
     }
   }
+
   addCompetitor() {
     this.competitors.push(this.competitorGroup());
   }
+
   invalid(name: 'name' | 'domain') {
     return this.form.controls[name].invalid && this.form.controls[name].touched;
   }
+
   save() {
     if (this.saving()) return;
     this.form.markAllAsTouched();
     if (this.form.invalid) return;
+
     this.saving.set(true);
     this.error.set(null);
     const raw = this.form.getRawValue();
@@ -269,13 +373,16 @@ export class BrandFormPage {
       language_code: raw.language_code || null,
       location_code: raw.location_code,
     };
+
     const id = this.id || this.createdId;
     const saveBrand = id ? this.api.updateBrand(id, body) : this.api.createBrand(body);
+
     saveBrand
       .pipe(
         concatMap((brand) => {
           this.createdId = brand.id;
-          // Add sequentially. Successful rows are removed so a retry cannot duplicate them.
+          // Added sequentially; each success is removed from the form so a
+          // retry after a mid-list failure cannot duplicate earlier rows.
           const pending = [...this.competitors.controls];
           let chain = of(brand.id);
           for (const group of pending)
