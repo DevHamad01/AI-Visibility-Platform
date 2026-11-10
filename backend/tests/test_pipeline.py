@@ -399,3 +399,44 @@ def test_one_serp_call_fails_but_successful_serp_data_survives(app, resilient_se
     assert stage.error_type == "PartialRetrievalError"
     assert stage.output_summary["entries_returned"] == 1
     assert session.query(Query).filter_by(run_id=run_id, text="best project management software").one()
+
+
+@respx.mock
+def test_two_parallel_stage_failures_do_not_crash_the_graph(app, resilient_settings, monkeypatch):  # noqa: ARG001
+    """keyword_retrieval, serp_retrieval and llm_mentions_retrieval fan out in
+    the same LangGraph superstep. Each writes its own error into the shared
+    `stage_errors` state key on failure. Without a reducer registered for
+    that key, two of them failing in the same step is an `InvalidUpdateError`
+    that crashes the whole graph — discarding every stage's work, including
+    ones that already succeeded, not just the failed ones. This reproduces
+    exactly that: a real DataForSEO outage is not limited to one endpoint.
+    """
+    monkeypatch.setattr("app.pipeline.runner.get_settings", lambda: resilient_settings)
+    respx.post(GROQ_URL).mock(side_effect=_groq_side_effect)
+    respx.post(f"{DF_BASE}/v3/dataforseo_labs/google/keyword_ideas/live").mock(return_value=httpx.Response(503))
+    respx.post(f"{DF_BASE}/v3/serp/google/organic/live/advanced").mock(return_value=httpx.Response(503))
+    _mock_llm_mentions()
+
+    brand = _make_brand_with_competitors()
+    run, _ = create_run(get_session(), app.extensions["redis"], resilient_settings, brand)
+    run_id = run.id
+    execute_run(str(run_id))  # must not raise — a crash here is the regression
+
+    session = get_session()
+    run = session.get(Run, run_id)
+    # llm_mentions_retrieval alone is still enough data to score, so the run
+    # correctly ends partial rather than failed — both error messages must
+    # still be recorded even though neither one is fatal to the run.
+    assert run.status == RunStatus.PARTIAL, run.error_summary
+    assert "keyword_retrieval" in (run.error_summary or "")
+    assert "serp_retrieval" in (run.error_summary or "")
+
+    stages = {s.stage: s for s in session.query(RunStage).filter(RunStage.run_id == run.id).all()}
+    assert stages["keyword_retrieval"].status == RunStageStatus.FAILED
+    assert stages["serp_retrieval"].status == RunStageStatus.FAILED
+    # The branch that did not fail, and everything downstream of convergence,
+    # must still be recorded — a crash would have left these "pending".
+    assert stages["llm_mentions_retrieval"].status == RunStageStatus.SUCCEEDED
+    assert stages["normalizer"].status == RunStageStatus.SUCCEEDED
+    assert stages["opportunity_scorer"].status == RunStageStatus.SUCCEEDED
+    assert stages["report"].status == RunStageStatus.SUCCEEDED
