@@ -37,6 +37,7 @@ def create_app(settings: Settings | None = None) -> OpenAPI:
         validation_error_callback=validation_error_callback,
     )
     app.config["SECRET_KEY"] = settings.secret_key
+    app.config["MAX_CONTENT_LENGTH"] = 256 * 1024  # 256KB — also bounds POST /client-errors
 
     init_engine(settings.database_url)
     app.extensions["redis"] = redis.Redis.from_url(settings.redis_url)
